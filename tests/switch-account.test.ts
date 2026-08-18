@@ -4,20 +4,37 @@ import {
   switchClaudeAccount,
   type AccountSwitchDependencies,
   type RecoverySnapshot,
+  type ThreadSnapshot,
 } from "../switch-account.ts";
 
-function recovery(failedRequestId = "req_1"): RecoverySnapshot {
+function thread(
+  status: NonNullable<ThreadSnapshot["status"]> = "idle",
+): ThreadSnapshot {
   return {
-    candidate: {
-      failedRequestId,
-      rateLimits: { providerId: "claude-code" },
-    },
-    hostId: "host_1",
-    reason: "manual-only",
+    environment: { hostId: "host_1" },
+    providerId: "claude-code",
+    status,
   };
 }
 
-function activeSignal(): AbortSignal {
+function recovery(
+  failedRequestId: string | null = "req_1",
+  reason = "manual-only",
+): RecoverySnapshot {
+  return {
+    candidate:
+      failedRequestId === null
+        ? null
+        : {
+            failedRequestId,
+            rateLimits: { providerId: "claude-code" },
+          },
+    hostId: "host_1",
+    reason,
+  };
+}
+
+function signal(): AbortSignal {
   return new AbortController().signal;
 }
 
@@ -26,8 +43,8 @@ function dependencies(
   overrides: Partial<AccountSwitchDependencies> = {},
 ): AccountSwitchDependencies {
   return {
-    continueThread: async (_threadId, failedRequestId) => {
-      events.push(`continue:${failedRequestId}`);
+    continueThread: async (_threadId, requestId) => {
+      events.push(`continue:${requestId}`);
     },
     getRecovery: async () => {
       events.push("recovery");
@@ -35,114 +52,72 @@ function dependencies(
     },
     getThread: async () => {
       events.push("thread");
-      return { providerId: "claude-code" };
+      return thread();
     },
-    login: async () => {
+    login: async (_threadId, _signal, onSuccess) => {
       events.push("login");
+      onSuccess?.();
     },
     stopThread: async () => {
       events.push("stop");
+    },
+    verifySubscription: async () => {
+      events.push("auth");
     },
     ...overrides,
   };
 }
 
-test("logs in, rechecks the failed turn, releases the runtime, then retries", async () => {
+test("an idle session uses the current login without opening OAuth", async () => {
   const events: string[] = [];
+
   const result = await switchClaudeAccount(
     dependencies(events),
-    "thread_1",
+    { mode: "current", threadId: "thread_1" },
     new Set(),
-    activeSignal(),
+    signal(),
   );
 
-  assert.deepEqual(result, { retrying: true });
+  assert.deepEqual(result, { outcome: "ready-next-message" });
+  assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
+});
+
+test("a safe rate-limit failure retries the exact failed turn", async () => {
+  const events: string[] = [];
+  const deps = dependencies(events, {
+    getThread: async () => {
+      events.push("thread");
+      return thread("error");
+    },
+  });
+
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "current", threadId: "thread_1" },
+    new Set(),
+    signal(),
+  );
+
+  assert.deepEqual(result, { outcome: "retried" });
   assert.deepEqual(events, [
     "thread",
     "recovery",
-    "login",
+    "auth",
+    "thread",
     "recovery",
     "stop",
     "continue:req_1",
   ]);
 });
 
-test("a failed login leaves the BB session untouched", async () => {
-  const events: string[] = [];
-  const deps = dependencies(events, {
-    login: async () => {
-      events.push("login");
-      throw new Error("login cancelled");
-    },
-  });
-
-  await assert.rejects(
-    switchClaudeAccount(deps, "thread_1", new Set(), activeSignal()),
-    /login cancelled/,
-  );
-  assert.deepEqual(events, ["thread", "recovery", "login"]);
-});
-
-test("cancelling a switch aborts login and releases the machine lock", async () => {
-  const events: string[] = [];
-  const controller = new AbortController();
-  let loginStarted!: () => void;
-  const started = new Promise<void>((resolve) => {
-    loginStarted = resolve;
-  });
-  const deps = dependencies(events, {
-    login: async (_threadId, signal) => {
-      events.push("login");
-      loginStarted();
-      if (!signal) throw new Error("missing cancellation signal");
-      await new Promise<void>((_resolve, reject) => {
-        if (signal.aborted) {
-          reject(new Error("login cancelled"));
-          return;
-        }
-        signal.addEventListener(
-          "abort",
-          () => reject(new Error("login cancelled")),
-          { once: true },
-        );
-      });
-    },
-  });
-  const locks = new Set<string>();
-  const running = switchClaudeAccount(
-    deps,
-    "thread_1",
-    locks,
-    controller.signal,
-  );
-  await started;
-
-  controller.abort();
-  await assert.rejects(running, /login cancelled/);
-  assert.equal(locks.size, 0);
-});
-
-test("cancelling as login finishes prevents the session retry", async () => {
-  const events: string[] = [];
-  const controller = new AbortController();
-  const deps = dependencies(events, {
-    login: async () => {
-      events.push("login");
-      controller.abort();
-    },
-  });
-
-  await assert.rejects(
-    switchClaudeAccount(deps, "thread_1", new Set(), controller.signal),
-    /cancelled/,
-  );
-  assert.deepEqual(events, ["thread", "recovery", "login"]);
-});
-
-test("a changed failed turn is not stopped or retried", async () => {
+test("a changed failed turn is never stopped or replayed", async () => {
   const events: string[] = [];
   let recoveryCount = 0;
   const deps = dependencies(events, {
+    getThread: async () => {
+      events.push("thread");
+      return thread("error");
+    },
     getRecovery: async () => {
       events.push("recovery");
       recoveryCount += 1;
@@ -150,95 +125,229 @@ test("a changed failed turn is not stopped or retried", async () => {
     },
   });
 
-  await assert.rejects(
-    switchClaudeAccount(deps, "thread_1", new Set(), activeSignal()),
-    /session changed while you were signing in/,
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "login", threadId: "thread_1" },
+    new Set(),
+    signal(),
+    { markCommitted: () => events.push("committed") },
   );
-  assert.deepEqual(events, ["thread", "recovery", "login", "recovery"]);
+
+  assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
+  assert.deepEqual(events, [
+    "thread",
+    "recovery",
+    "login",
+    "committed",
+    "auth",
+    "thread",
+    "recovery",
+  ]);
 });
 
-test("a failed turn that disappears during login is not stopped", async () => {
+test("a non-rate-limit error releases the runtime for the next message", async () => {
   const events: string[] = [];
-  let recoveryCount = 0;
   const deps = dependencies(events, {
+    getThread: async () => {
+      events.push("thread");
+      return thread("error");
+    },
     getRecovery: async () => {
       events.push("recovery");
-      recoveryCount += 1;
-      return recoveryCount === 1
-        ? recovery()
-        : {
-            candidate: null,
-            hostId: "host_1",
-            reason: "thread-not-failed",
-          };
+      return recovery(null, "no-rate-limit-state");
+    },
+  });
+
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "current", threadId: "thread_1" },
+    new Set(),
+    signal(),
+  );
+
+  assert.deepEqual(result, { outcome: "ready-next-message" });
+  assert.deepEqual(events, [
+    "thread",
+    "recovery",
+    "auth",
+    "thread",
+    "recovery",
+    "stop",
+  ]);
+});
+
+test("a provider-owned retry is refused without releasing the runtime", async () => {
+  const events: string[] = [];
+  const deps = dependencies(events, {
+    getThread: async () => {
+      events.push("thread");
+      return thread("error");
+    },
+    getRecovery: async () => {
+      events.push("recovery");
+      return recovery(null, "provider-will-retry");
     },
   });
 
   await assert.rejects(
-    switchClaudeAccount(deps, "thread_1", new Set(), activeSignal()),
-    /no longer safe to retry/,
+    switchClaudeAccount(
+      deps,
+      { mode: "current", threadId: "thread_1" },
+      new Set(),
+      signal(),
+    ),
+    /already scheduled to retry/,
   );
-  assert.deepEqual(events, ["thread", "recovery", "login", "recovery"]);
+  assert.deepEqual(events, ["thread", "recovery"]);
+});
+
+for (const status of ["active", "starting", "stopping"] as const) {
+  test(`${status} work is refused before login or authentication`, async () => {
+    const events: string[] = [];
+    const deps = dependencies(events, {
+      getThread: async () => {
+        events.push("thread");
+        return thread(status);
+      },
+    });
+
+    await assert.rejects(
+      switchClaudeAccount(
+        deps,
+        { mode: "login", threadId: "thread_1" },
+        new Set(),
+        signal(),
+      ),
+      /become idle/,
+    );
+    assert.deepEqual(events, ["thread"]);
+  });
+}
+
+test("a completed login with failed auth proof does not release the session", async () => {
+  const events: string[] = [];
+  const deps = dependencies(events, {
+    verifySubscription: async () => {
+      events.push("auth");
+      throw new Error("subscription login could not be verified");
+    },
+  });
+
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "login", threadId: "thread_1" },
+    new Set(),
+    signal(),
+    { markCommitted: () => events.push("committed") },
+  );
+
+  assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
+  assert.deepEqual(events, ["thread", "login", "committed", "auth"]);
+});
+
+test("cancellation before the current-login commit leaves the runtime untouched", async () => {
+  const events: string[] = [];
+  const controller = new AbortController();
+  const deps = dependencies(events, {
+    verifySubscription: async () => {
+      events.push("auth");
+      controller.abort();
+    },
+  });
+
+  await assert.rejects(
+    switchClaudeAccount(
+      deps,
+      { mode: "current", threadId: "thread_1" },
+      new Set(),
+      controller.signal,
+    ),
+    /cancelled/,
+  );
+  assert.deepEqual(events, ["thread", "auth"]);
+});
+
+test("login success commits before auth verification and ignores a late cancel", async () => {
+  const events: string[] = [];
+  const controller = new AbortController();
+  const deps = dependencies(events, {
+    login: async (_threadId, _signal, onSuccess) => {
+      events.push("login");
+      onSuccess?.();
+      controller.abort();
+    },
+  });
+
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "login", threadId: "thread_1" },
+    new Set(),
+    controller.signal,
+    { markCommitted: () => events.push("committed") },
+  );
+
+  assert.deepEqual(result, { outcome: "ready-next-message" });
+  assert.deepEqual(events, ["thread", "login", "committed", "auth", "thread", "stop"]);
 });
 
 test("a second switch on the same machine is refused", async () => {
   const events: string[] = [];
-  let releaseLogin!: () => void;
-  let loginStarted!: () => void;
+  let releaseAuth!: () => void;
+  let authStarted!: () => void;
   const started = new Promise<void>((resolve) => {
-    loginStarted = resolve;
+    authStarted = resolve;
   });
-  const loginGate = new Promise<void>((resolve) => {
-    releaseLogin = resolve;
+  const authGate = new Promise<void>((resolve) => {
+    releaseAuth = resolve;
   });
   const deps = dependencies(events, {
-    login: async () => {
-      events.push("login");
-      loginStarted();
-      await loginGate;
+    verifySubscription: async () => {
+      events.push("auth");
+      authStarted();
+      await authGate;
     },
   });
   const locks = new Set<string>();
-  const first = switchClaudeAccount(deps, "thread_1", locks, activeSignal());
+  const first = switchClaudeAccount(
+    deps,
+    { mode: "current", threadId: "thread_1" },
+    locks,
+    signal(),
+  );
   await started;
 
   await assert.rejects(
-    switchClaudeAccount(deps, "thread_2", locks, activeSignal()),
+    switchClaudeAccount(
+      deps,
+      { mode: "current", threadId: "thread_2" },
+      locks,
+      signal(),
+    ),
     /already open on this machine/,
   );
-  releaseLogin();
+  releaseAuth();
   await first;
+  assert.equal(locks.size, 0);
 });
 
-test("non-Claude and non-retriable sessions fail before login", async () => {
-  const nonClaudeEvents: string[] = [];
-  await assert.rejects(
-    switchClaudeAccount(
-      dependencies(nonClaudeEvents, {
-        getThread: async () => ({ providerId: "codex" }),
-      }),
-      "thread_1",
-      new Set(),
-      activeSignal(),
-    ),
-    /only works in Claude Code sessions/,
-  );
-  assert.deepEqual(nonClaudeEvents, []);
+test("non-Claude and missing-host sessions fail before login", async () => {
+  for (const snapshot of [
+    { ...thread(), providerId: "codex" },
+    { ...thread(), environment: null },
+  ]) {
+    const events: string[] = [];
+    const deps = dependencies(events, {
+      getThread: async () => snapshot,
+    });
 
-  const noRetryEvents: string[] = [];
-  await assert.rejects(
-    switchClaudeAccount(
-      dependencies(noRetryEvents, {
-        getRecovery: async () => ({
-          candidate: null,
-          hostId: "host_1",
-          reason: "no-rate-limit-state",
-        }),
-      }),
-      "thread_1",
-      new Set(),
-      activeSignal(),
-    ),
-    /does not have a safe Claude subscription-limit retry/,
-  );
+    await assert.rejects(
+      switchClaudeAccount(
+        deps,
+        { mode: "login", threadId: "thread_1" },
+        new Set(),
+        signal(),
+      ),
+    );
+    assert.deepEqual(events, []);
+  }
 });

@@ -8,15 +8,17 @@
   },
   "bb": {
     "name": "Claude Account Switcher",
-    "description": "Switch the Claude Code login on a session's machine, release the failed runtime, and retry the same BB thread.",
+    "description": "Rebind one BB Claude Code session to the verified subscription login on its machine.",
     "branding": {
-      "icon": "ArrowReloadHorizontal"
+      "icon": "UserSwitch"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
   },
   "scripts": {
     "build": "bb plugin build",
+    "format": "prettier --write --ignore-unknown .",
+    "format:check": "prettier --check --ignore-unknown .",
     "test": "bb plugin build && node --test tests/*.test.ts && vitest run tests/app.test.tsx",
     "typecheck": "tsc --noEmit"
   },
@@ -42,6 +44,7 @@
     "cron-parser": "^5.10.0",
     "hono": "^4.13.2",
     "jsdom": "^30.0.1",
+    "prettier": "^3.6.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "sonner": "^1.7.4",

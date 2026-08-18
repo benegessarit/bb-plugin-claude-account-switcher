@@ -1,0 +1,42 @@
+agent = "codex"
+review_agent = "codex"
+refine_agent = "codex"
+model = "gpt-5.6-sol"
+display_name = "Claude Session Login for BB"
+review_context_count = 0
+post_commit_review = "commit"
+review_reasoning = "maximum"
+refine_reasoning = "maximum"
+review_min_severity = "medium"
+auto_close_passing_reviews = true
+max_prompt_size = 120000
+
+exclude_patterns = [
+  ".env*",
+  "**/.env*",
+  "*.pem",
+  "**/*.pem",
+  "*.key",
+  "**/*.key",
+  "auth.json",
+  "**/auth.json",
+  "credentials/**",
+  "**/credentials/**",
+  "secrets/**",
+  "**/secrets/**",
+  "node_modules/**",
+  "**/node_modules/**",
+  "dist/**",
+  "**/dist/**",
+  ".codegraph/**",
+  "**/.codegraph/**",
+  ".roborev/**",
+  "**/.roborev/**",
+  ".claude/settings.local.json",
+]
+
+review_guidelines = """
+This local BB plugin releases a selected Claude Code runtime after verifying subscription authentication on the exact machine.
+Prioritize incorrect state transitions, active-session interruption, replay of a changed failed request, cancellation races, credential or terminal-output exposure, host-lock leaks, and tests that do not exercise the public plugin contract.
+Do not report style-only findings, speculative architecture, or requests for remote CI in this local-only tiny tool.
+"""

@@ -31,16 +31,15 @@ interface ResponsiveDialogContextValue extends ResponsiveOverlayContextValue {
   registerDescriptionId: (id: string) => () => void;
 }
 
-const ResponsiveDialogContext =
-  React.createContext<ResponsiveDialogContextValue>({
-    isCompactViewport: false,
-    open: false,
-    onOpenChange: () => {},
-    titleId: "",
-    descriptionId: "",
-    registerTitleId: () => () => {},
-    registerDescriptionId: () => () => {},
-  });
+const ResponsiveDialogContext = React.createContext<ResponsiveDialogContextValue>({
+  isCompactViewport: false,
+  open: false,
+  onOpenChange: () => {},
+  titleId: "",
+  descriptionId: "",
+  registerTitleId: () => () => {},
+  registerDescriptionId: () => () => {},
+});
 
 function useResponsiveDialog() {
   return React.useContext(ResponsiveDialogContext);
@@ -60,9 +59,7 @@ function Dialog({
   const generatedTitleId = React.useId();
   const generatedDescriptionId = React.useId();
   const [titleId, setTitleId] = React.useState(generatedTitleId);
-  const [descriptionId, setDescriptionId] = React.useState(
-    generatedDescriptionId,
-  );
+  const [descriptionId, setDescriptionId] = React.useState(generatedDescriptionId);
   const registerTitleId = React.useCallback(
     (id: string) => {
       setTitleId(id);
@@ -85,23 +82,13 @@ function Dialog({
       registerTitleId,
       registerDescriptionId,
     }),
-    [
-      descriptionId,
-      registerDescriptionId,
-      registerTitleId,
-      responsiveRoot,
-      titleId,
-    ],
+    [descriptionId, registerDescriptionId, registerTitleId, responsiveRoot, titleId],
   );
 
   const body = ctx.isCompactViewport ? (
     children
   ) : (
-    <DialogPrimitive.Root
-      open={ctx.open}
-      onOpenChange={ctx.onOpenChange}
-      {...props}
-    >
+    <DialogPrimitive.Root open={ctx.open} onOpenChange={ctx.onOpenChange} {...props}>
       {children}
     </DialogPrimitive.Root>
   );
@@ -172,9 +159,7 @@ const DialogClose = React.forwardRef<HTMLButtonElement, DialogCloseProps>(
 
     if (isCompactViewport) {
       const Comp = asChild ? Slot : "button";
-      const handleClick: React.MouseEventHandler<HTMLButtonElement> = (
-        event,
-      ) => {
+      const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
         onClick?.(event);
         if (!event.defaultPrevented) {
           onOpenChange(false);
@@ -188,12 +173,7 @@ const DialogClose = React.forwardRef<HTMLButtonElement, DialogCloseProps>(
     }
 
     return (
-      <DialogPrimitive.Close
-        ref={ref}
-        asChild={asChild}
-        onClick={onClick}
-        {...props}
-      >
+      <DialogPrimitive.Close ref={ref} asChild={asChild} onClick={onClick} {...props}>
         {children}
       </DialogPrimitive.Close>
     );
@@ -299,10 +279,7 @@ const DialogHeader = ({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div
-    className={cn("flex flex-col space-y-1.5 text-left", className)}
-    {...props}
-  />
+  <div className={cn("flex flex-col space-y-1.5 text-left", className)} {...props} />
 );
 DialogHeader.displayName = "DialogHeader";
 
@@ -341,10 +318,7 @@ const DialogTitle = React.forwardRef<
   if (isCompactViewport) {
     const titleProps = {
       id: resolvedId,
-      className: cn(
-        "text-base font-semibold leading-none tracking-tight",
-        className,
-      ),
+      className: cn("text-base font-semibold leading-none tracking-tight", className),
       ...props,
     };
     if (asChild) {
@@ -365,10 +339,7 @@ const DialogTitle = React.forwardRef<
       ref={ref}
       asChild={asChild}
       {...(id === undefined ? {} : { id })}
-      className={cn(
-        "text-base font-semibold leading-none tracking-tight",
-        className,
-      )}
+      className={cn("text-base font-semibold leading-none tracking-tight", className)}
       {...props}
     >
       {children}

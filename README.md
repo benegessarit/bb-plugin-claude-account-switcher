@@ -1,43 +1,29 @@
-# Claude Account Switcher for BB
+# Claude Session Login for BB
 
-This local BB plugin adds a **Switch Claude** button to Claude Code session
-headers.
+This local BB plugin rebinds one existing Claude Code session to the verified Claude subscription login on that session's machine. It removes the need to restart BB after changing Claude accounts.
 
-When a Claude subscription limit stops a session, the button performs one safe
-recovery flow:
+The header button has two paths:
 
-1. It confirms that BB has a retriable Claude limit failure.
-2. It asks for the target Claude account email before opening the browser, so
-   account selection does not leave Claude's OAuth flow.
-3. It opens the normal `claude auth login --claudeai --email …` flow on that
-   session's machine.
-4. If Claude displays an authorization code instead of returning to the CLI,
-   the dialog can send that code to the waiting login without storing it.
-5. It waits for login to finish without reading or storing credentials.
-6. It releases only the selected session's old Claude runtime.
-7. It retries the same failed turn with the session history intact.
+- **Use current login** verifies the machine's existing Claude subscription, releases only the selected session's loaded runtime, and either retries its exact rate-limited turn or waits for the next message.
+- **Sign in to another account** opens Claude's own subscription login first. The email field is an optional browser prefill. It does not pin the account to the session.
 
-If login is cancelled or fails, the plugin does not stop or retry the session.
-Closing the dialog or pressing **Cancel** also stops the pending login and
-releases its machine lock, so the button can be used again immediately. The
-plugin refuses a retry if the failed turn changes while login is open.
+Claude login remains machine-wide. Rebinding a BB session does not create per-session credential isolation. BB 0.38 also cannot atomically combine the plugin's final idle check with runtime release, so another sender can create a small race. The plugin refuses every state it observes as active, starting, or stopping.
 
-## Important limit
+## Safety
 
-Claude Code's subscription login is machine-wide. This plugin does not create
-true per-session account isolation. Other Claude sessions that restart on the
-same machine can also use the newly selected account.
-
-The login command runs on the machine assigned to the BB session. That machine
-must have Claude Code installed and must be able to open the OAuth browser.
+- The plugin never reads Claude credential files or macOS Keychain.
+- Raw `claude auth status` output never enters BB. A child process emits only four classification fields.
+- Email and authorization codes stay transient and are never stored or logged.
+- Rate-limit retry requires the same failed request before and after login.
+- A per-machine lock prevents overlapping login changes.
 
 ## Development
 
 ```sh
+npm ci
 npm test
 npm run typecheck
-npm run build
-bb plugin install .
+npm run format:check
 ```
 
-No real login is used by the test suite.
+The installed plugin uses this directory as a local BB source. Reload it with `bb plugin reload claude-account-switcher` after a successful build.

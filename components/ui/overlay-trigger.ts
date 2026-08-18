@@ -25,16 +25,13 @@ function isKeyboardInputElement(element: Element): element is HTMLElement {
   if (element instanceof HTMLTextAreaElement) return true;
   if (element instanceof HTMLInputElement) {
     return (
-      !element.disabled &&
-      !element.readOnly &&
-      !NON_TEXT_INPUT_TYPES.has(element.type)
+      !element.disabled && !element.readOnly && !NON_TEXT_INPUT_TYPES.has(element.type)
     );
   }
   if (!(element instanceof HTMLElement)) return false;
 
   return (
-    element.isContentEditable ||
-    element.closest("[contenteditable='true']") !== null
+    element.isContentEditable || element.closest("[contenteditable='true']") !== null
   );
 }
 
