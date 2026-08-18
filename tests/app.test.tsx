@@ -97,6 +97,38 @@ test("sign-in is optional and accepts a blank email prefill", async () => {
   }
 });
 
+test("the browser handoff explains that Claude's home screen does not end the BB flow", async () => {
+  let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
+  const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  const slot = await renderAction({
+    ...defaultRpc,
+    switchAccount: async () => switchResult,
+  });
+
+  try {
+    fireEvent.click(
+      await slot.findByRole("button", {
+        name: "Switch Claude login for this session",
+      }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Sign in to another account" }),
+    );
+    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+
+    expect(
+      await slot.findByText(/Claude may leave you on its home screen/i),
+    ).not.toBeNull();
+    expect(await slot.findByText(/Leave this dialog open/i)).not.toBeNull();
+  } finally {
+    finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
 test("an invalid optional email stays in the dialog with one inline error", async () => {
   const slot = await renderAction();
 

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { tmpdir } from "node:os";
 import * as loginTerminal from "../login-terminal.ts";
 import {
   buildClaudeLoginCommand,
@@ -66,7 +70,115 @@ test("the auth-status command emits only safe classification fields", () => {
   assert.doesNotMatch(command, /accountEmail|orgId|orgName/);
 });
 
-test("auth status accepts only active first-party subscription login", () => {
+test("the auth-status helper stays readable, then self-exits if cleanup is lost", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-auth-status-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","accountEmail":"private@example.com"}\'',
+    ].join("\n"),
+  );
+  await chmod(fakeClaude, 0o755);
+
+  const child = spawn(
+    "/bin/sh",
+    ["-c", loginTerminal.buildClaudeAuthStatusCommand(200)],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  try {
+    let output = "";
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("auth-status helper did not emit output")),
+        1_000,
+      );
+      child.once("error", reject);
+      child.stdout.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+        if (output.includes("subscriptionType=max")) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(child.exitCode, null);
+    assert.equal(
+      output,
+      "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n",
+    );
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("auth-status helper did not self-exit")),
+        1_000,
+      );
+      child.once("exit", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+    });
+    assert.equal(exitCode, 3);
+  } finally {
+    if (child.exitCode === null) {
+      process.kill(-child.pid!, "SIGTERM");
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the auth-status helper kills a hung Claude status command", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-auth-hang-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  await writeFile(fakeClaude, ["#!/bin/sh", "exec /bin/sleep 10"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+
+  const child = spawn(
+    "/bin/sh",
+    ["-c", loginTerminal.buildClaudeAuthStatusCommand(200)],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("hung auth-status command was not killed")),
+        1_000,
+      );
+      child.once("exit", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+    });
+    assert.equal(exitCode, 1);
+  } finally {
+    if (child.exitCode === null) {
+      process.kill(-child.pid!, "SIGTERM");
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("auth status accepts the CRLF output produced by a BB terminal", () => {
   const parse = Reflect.get(loginTerminal, "parseClaudeAuthStatus") as unknown;
   assert.equal(typeof parse, "function");
 
@@ -76,7 +188,7 @@ test("auth status accepts only active first-party subscription login", () => {
     "apiProvider=firstParty",
     "subscriptionType=max",
     "",
-  ].join("\n");
+  ].join("\r\n");
   assert.deepEqual((parse as (value: string) => unknown)(output), {
     apiProvider: "firstParty",
     authMethod: "claude.ai",
@@ -99,10 +211,11 @@ test("auth status fails closed on unsafe or incomplete output", () => {
   }
 });
 
-test("auth verification reads safe output and closes its helper terminal", async () => {
+test("auth verification reads safe output before BB discards exited terminal output", async () => {
   const runStatus = Reflect.get(loginTerminal, "runClaudeAuthStatus") as unknown;
   assert.equal(typeof runStatus, "function");
   const closes: Array<"force" | "if-clean"> = [];
+  let running = true;
 
   const status = await (
     runStatus as (
@@ -116,9 +229,18 @@ test("auth verification reads safe output and closes its helper terminal", async
         closes.push(mode);
       },
       create: async () => terminal("running"),
-      get: async () => terminal("exited", 0),
-      output: async () =>
-        "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n",
+      get: async () => {
+        running = false;
+        return terminal("exited", 0);
+      },
+      output: async () => {
+        if (!running) {
+          throw new Error(
+            "HTTP 409: Terminal output is unavailable because the session is not running",
+          );
+        }
+        return "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n";
+      },
     },
     "thread_1",
     { sleep: async () => undefined, timeoutMs: 15_000 },
@@ -130,7 +252,7 @@ test("auth verification reads safe output and closes its helper terminal", async
     loggedIn: true,
     subscriptionType: "max",
   });
-  assert.deepEqual(closes, ["if-clean"]);
+  assert.deepEqual(closes, ["force"]);
 });
 
 test("a successful terminal login closes cleanly", async () => {
@@ -233,11 +355,12 @@ test("cancellation wakes a pending poll without waiting for its timer", async ()
   assert.deepEqual(closes, ["force"]);
 });
 
-test("auth cancellation wakes a pending poll without another terminal read", async () => {
+test("auth cancellation wakes a pending poll without another terminal state read", async () => {
   const controller = new AbortController();
   let pollStarted!: () => void;
   let releasePoll!: () => void;
-  let reads = 0;
+  let stateReads = 0;
+  let outputReads = 0;
   const started = new Promise<void>((resolve) => {
     pollStarted = resolve;
   });
@@ -248,11 +371,13 @@ test("auth cancellation wakes a pending poll without another terminal read", asy
     close: async () => undefined,
     create: async () => terminal("running"),
     get: async () => {
-      reads += 1;
+      stateReads += 1;
       return terminal("exited", 0);
     },
-    output: async () =>
-      "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n",
+    output: async () => {
+      outputReads += 1;
+      throw new Error("filtered output is not ready");
+    },
   };
   const running = runClaudeAuthStatus(authClient, "thread_1", {
     signal: controller.signal,
@@ -266,7 +391,8 @@ test("auth cancellation wakes a pending poll without another terminal read", asy
   controller.abort();
   await assert.rejects(running, /subscription login could not be verified/);
   releasePoll();
-  assert.equal(reads, 0);
+  assert.equal(outputReads, 1);
+  assert.equal(stateReads, 0);
 });
 
 test("terminal cleanup cannot turn a successful login into a failure", async () => {

@@ -26,9 +26,9 @@ test("the current-login RPC verifies the exact host and releases an idle runtime
           status: "exited" as const,
         }),
         create: async () => ({
-          exitCode: 0,
+          exitCode: null,
           id: "status_terminal",
-          status: "exited" as const,
+          status: "running" as const,
         }),
         output: async () => ({
           chunks: [
@@ -90,9 +90,9 @@ test("two sessions on one machine can rebind sequentially", async () => {
       terminals: {
         close: async () => undefined,
         create: async () => ({
-          exitCode: 0,
+          exitCode: null,
           id: "status_terminal",
-          status: "exited" as const,
+          status: "running" as const,
         }),
         output: async () => ({
           chunks: [
@@ -202,6 +202,7 @@ test("current-login cancellation settles before releasing the runtime", async ()
 });
 
 test("cancellation after login success reports that safe completion is in progress", async () => {
+  let terminalCreates = 0;
   let usageStarted!: () => void;
   let releaseUsage!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -231,11 +232,20 @@ test("cancellation after login success reports that safe completion is in progre
       },
       terminals: {
         close: async () => undefined,
-        create: async () => ({
-          exitCode: 0,
-          id: "helper_terminal",
-          status: "exited" as const,
-        }),
+        create: async () => {
+          terminalCreates += 1;
+          return terminalCreates === 1
+            ? {
+                exitCode: 0,
+                id: "login_terminal",
+                status: "exited" as const,
+              }
+            : {
+                exitCode: null,
+                id: "status_terminal",
+                status: "running" as const,
+              };
+        },
         output: async () => ({
           chunks: [
             {

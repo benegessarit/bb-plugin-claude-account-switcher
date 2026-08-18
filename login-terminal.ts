@@ -7,12 +7,15 @@ export function buildClaudeLoginCommand(email?: string): string {
   return `command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`;
 }
 
-export function buildClaudeAuthStatusCommand(): string {
+export function buildClaudeAuthStatusCommand(phaseTimeoutMs = 30_000): string {
+  if (!Number.isSafeInteger(phaseTimeoutMs) || phaseTimeoutMs <= 0) {
+    throw new Error("Claude auth-status helper timeout must be a positive integer.");
+  }
   const script = [
     'const {spawnSync}=require("node:child_process")',
-    'const result=spawnSync("claude",["auth","status","--json"],{encoding:"utf8"})',
+    `const result=spawnSync("claude",["auth","status","--json"],{encoding:"utf8",killSignal:"SIGKILL",timeout:${phaseTimeoutMs}})`,
     "if(result.status!==0)process.exit(result.status??1)",
-    'try{const status=JSON.parse(result.stdout);const fields=[["loggedIn",String(status.loggedIn)],["authMethod",status.authMethod],["apiProvider",status.apiProvider],["subscriptionType",status.subscriptionType]];if(fields.some(([,value])=>typeof value!=="string"||!/^[A-Za-z0-9._-]+$/.test(value)))process.exit(2);process.stdout.write(fields.map(([key,value])=>`${key}=${value}`).join("\\n")+"\\n")}catch{process.exit(2)}',
+    `try{const status=JSON.parse(result.stdout);const fields=[["loggedIn",String(status.loggedIn)],["authMethod",status.authMethod],["apiProvider",status.apiProvider],["subscriptionType",status.subscriptionType]];if(fields.some(([,value])=>typeof value!=="string"||!/^[A-Za-z0-9._-]+$/.test(value)))process.exit(2);process.stdout.write(fields.map(([key,value])=>key+"="+value).join("\\n")+"\\n");setTimeout(()=>process.exit(3),${phaseTimeoutMs})}catch{process.exit(2)}`,
   ].join(";");
   return `command node -e ${shellQuote(script)} 2>/dev/null`;
 }
@@ -29,7 +32,7 @@ const AUTH_STATUS_ERROR =
 
 export function parseClaudeAuthStatus(output: string): ClaudeAuthStatus {
   const entries = output
-    .split("\n")
+    .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => line.split("="));
   if (
@@ -189,17 +192,21 @@ export async function runClaudeAuthStatus(
   const timeoutMs = options.timeoutMs ?? 15_000;
   const terminal = await client.create(threadId);
   const deadline = now() + timeoutMs;
-  let closeMode: "force" | "if-clean" = "force";
 
   try {
     let current = terminal;
     while (true) {
       if (signal?.aborted) throw new Error(AUTH_STATUS_ERROR);
+      if (current.status === "running") {
+        try {
+          return parseClaudeAuthStatus(await client.output(terminal.id));
+        } catch {
+          // The filtered result may not be in scrollback yet, or the helper may
+          // have exited between the status read and the output request.
+        }
+      }
       if (current.status === "exited") {
-        if (current.exitCode !== 0) throw new Error(AUTH_STATUS_ERROR);
-        const status = parseClaudeAuthStatus(await client.output(terminal.id));
-        closeMode = "if-clean";
-        return status;
+        throw new Error(AUTH_STATUS_ERROR);
       }
       if (current.status === "disconnected" || now() >= deadline) {
         throw new Error(AUTH_STATUS_ERROR);
@@ -210,7 +217,7 @@ export async function runClaudeAuthStatus(
     }
   } finally {
     try {
-      await client.close(terminal.id, closeMode);
+      await client.close(terminal.id, "force");
     } catch {
       // Best-effort cleanup must not hide the auth classification result.
     } finally {

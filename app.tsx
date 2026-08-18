@@ -242,6 +242,10 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
                     <Icon name="Loading" className="animate-spin" aria-hidden="true" />
                     <span>Finish signing in in the browser.</span>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    Claude may leave you on its home screen. Leave this dialog open; BB
+                    will finish when Claude Code confirms the login.
+                  </p>
                   <Button
                     aria-expanded={codeExpanded}
                     onClick={() => setCodeExpanded((value) => !value)}
