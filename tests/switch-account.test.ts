@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   switchClaudeAccount,
   type AccountSwitchDependencies,
-  type RecoverySnapshot,
   type ThreadSnapshot,
 } from "../switch-account.ts";
 
@@ -17,23 +16,6 @@ function thread(
   };
 }
 
-function recovery(
-  failedRequestId: string | null = "req_1",
-  reason = "manual-only",
-): RecoverySnapshot {
-  return {
-    candidate:
-      failedRequestId === null
-        ? null
-        : {
-            failedRequestId,
-            rateLimits: { providerId: "claude-code" },
-          },
-    hostId: "host_1",
-    reason,
-  };
-}
-
 function signal(): AbortSignal {
   return new AbortController().signal;
 }
@@ -43,13 +25,6 @@ function dependencies(
   overrides: Partial<AccountSwitchDependencies> = {},
 ): AccountSwitchDependencies {
   return {
-    continueThread: async (_threadId, requestId) => {
-      events.push(`continue:${requestId}`);
-    },
-    getRecovery: async () => {
-      events.push("recovery");
-      return recovery();
-    },
     getThread: async () => {
       events.push("thread");
       return thread();
@@ -83,7 +58,7 @@ test("an idle session uses the current login without opening OAuth", async () =>
   assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
 });
 
-test("a safe rate-limit failure retries the exact failed turn", async () => {
+test("an errored session releases the runtime for the next message", async () => {
   const events: string[] = [];
   const deps = dependencies(events, {
     getThread: async () => {
@@ -99,30 +74,21 @@ test("a safe rate-limit failure retries the exact failed turn", async () => {
     signal(),
   );
 
-  assert.deepEqual(result, { outcome: "retried" });
-  assert.deepEqual(events, [
-    "thread",
-    "recovery",
-    "auth",
-    "thread",
-    "recovery",
-    "stop",
-    "continue:req_1",
-  ]);
+  assert.deepEqual(result, { outcome: "ready-next-message" });
+  assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
 });
 
-test("a changed failed turn is never stopped or replayed", async () => {
+test("a session that moves to another machine is never stopped", async () => {
   const events: string[] = [];
-  let recoveryCount = 0;
+  let threadCount = 0;
   const deps = dependencies(events, {
     getThread: async () => {
       events.push("thread");
-      return thread("error");
-    },
-    getRecovery: async () => {
-      events.push("recovery");
-      recoveryCount += 1;
-      return recovery(recoveryCount === 1 ? "req_1" : "req_2");
+      threadCount += 1;
+      return {
+        ...thread("error"),
+        environment: { hostId: threadCount === 1 ? "host_1" : "host_2" },
+      };
     },
   });
 
@@ -135,71 +101,7 @@ test("a changed failed turn is never stopped or replayed", async () => {
   );
 
   assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
-  assert.deepEqual(events, [
-    "thread",
-    "recovery",
-    "login",
-    "committed",
-    "auth",
-    "thread",
-    "recovery",
-  ]);
-});
-
-test("a non-rate-limit error releases the runtime for the next message", async () => {
-  const events: string[] = [];
-  const deps = dependencies(events, {
-    getThread: async () => {
-      events.push("thread");
-      return thread("error");
-    },
-    getRecovery: async () => {
-      events.push("recovery");
-      return recovery(null, "no-rate-limit-state");
-    },
-  });
-
-  const result = await switchClaudeAccount(
-    deps,
-    { mode: "current", threadId: "thread_1" },
-    new Set(),
-    signal(),
-  );
-
-  assert.deepEqual(result, { outcome: "ready-next-message" });
-  assert.deepEqual(events, [
-    "thread",
-    "recovery",
-    "auth",
-    "thread",
-    "recovery",
-    "stop",
-  ]);
-});
-
-test("a provider-owned retry is refused without releasing the runtime", async () => {
-  const events: string[] = [];
-  const deps = dependencies(events, {
-    getThread: async () => {
-      events.push("thread");
-      return thread("error");
-    },
-    getRecovery: async () => {
-      events.push("recovery");
-      return recovery(null, "provider-will-retry");
-    },
-  });
-
-  await assert.rejects(
-    switchClaudeAccount(
-      deps,
-      { mode: "current", threadId: "thread_1" },
-      new Set(),
-      signal(),
-    ),
-    /already scheduled to retry/,
-  );
-  assert.deepEqual(events, ["thread", "recovery"]);
+  assert.deepEqual(events, ["thread", "login", "committed", "auth", "thread"]);
 });
 
 for (const status of ["active", "starting", "stopping"] as const) {

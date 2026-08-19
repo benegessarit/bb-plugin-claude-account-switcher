@@ -1,5 +1,4 @@
 const CLAUDE_PROVIDER_ID = "claude-code";
-const SAFE_RECOVERY_REASONS = new Set(["eligible", "manual-only"]);
 
 export interface ThreadSnapshot {
   readonly providerId: string;
@@ -7,18 +6,7 @@ export interface ThreadSnapshot {
   readonly environment?: { readonly hostId: string } | null;
 }
 
-export interface RecoverySnapshot {
-  readonly reason: string;
-  readonly hostId: string;
-  readonly candidate: {
-    readonly failedRequestId: string;
-    readonly rateLimits: { readonly providerId: string };
-  } | null;
-}
-
 export interface AccountSwitchDependencies {
-  continueThread(threadId: string, failedRequestId: string): Promise<void>;
-  getRecovery(threadId: string): Promise<RecoverySnapshot>;
   getThread(threadId: string): Promise<ThreadSnapshot>;
   login(
     threadId: string,
@@ -42,7 +30,6 @@ export interface AccountSwitchLifecycle {
 
 interface SessionAction {
   readonly hostId: string;
-  readonly failedRequestId?: string;
 }
 
 async function classifySession(
@@ -57,7 +44,7 @@ async function classifySession(
   if (!hostId) {
     throw new Error("BB could not identify this session's machine.");
   }
-  if (thread.status === "idle") return { hostId };
+  if (thread.status === "idle" || thread.status === "error") return { hostId };
   if (
     thread.status === "active" ||
     thread.status === "starting" ||
@@ -67,36 +54,7 @@ async function classifySession(
       "Wait for this session to become idle before switching its Claude login.",
     );
   }
-  if (thread.status !== "error") {
-    throw new Error("This session is not ready to rebind.");
-  }
-
-  const recovery = await dependencies.getRecovery(threadId);
-  if (recovery.hostId !== hostId) {
-    throw new Error("This session's machine changed before BB could rebind it.");
-  }
-  if (recovery.reason === "provider-will-retry") {
-    throw new Error("Claude is already scheduled to retry this session automatically.");
-  }
-  try {
-    return { hostId, failedRequestId: recoveryRequestId(recovery) };
-  } catch {
-    return { hostId };
-  }
-}
-
-function recoveryRequestId(recovery: RecoverySnapshot): string {
-  const candidate = recovery.candidate;
-  if (
-    candidate === null ||
-    candidate.rateLimits.providerId !== CLAUDE_PROVIDER_ID ||
-    !SAFE_RECOVERY_REASONS.has(recovery.reason)
-  ) {
-    throw new Error(
-      "This session does not have a safe Claude subscription-limit retry ready.",
-    );
-  }
-  return candidate.failedRequestId;
+  throw new Error("This session is not ready to rebind.");
 }
 
 function throwIfCancelled(signal: AbortSignal): void {
@@ -112,9 +70,7 @@ export async function switchClaudeAccount(
   signal: AbortSignal,
   lifecycle: AccountSwitchLifecycle = { markCommitted: () => undefined },
 ): Promise<
-  | { outcome: "ready-next-message" }
-  | { outcome: "retried" }
-  | { outcome: "login-changed-not-rebound" }
+  { outcome: "ready-next-message" } | { outcome: "login-changed-not-rebound" }
 > {
   throwIfCancelled(signal);
   const initial = await classifySession(dependencies, request.threadId);
@@ -153,10 +109,7 @@ export async function switchClaudeAccount(
       }
       throw error;
     }
-    if (
-      current.hostId !== initial.hostId ||
-      current.failedRequestId !== initial.failedRequestId
-    ) {
+    if (current.hostId !== initial.hostId) {
       if (request.mode === "login") {
         return { outcome: "login-changed-not-rebound" };
       }
@@ -177,16 +130,6 @@ export async function switchClaudeAccount(
       );
     }
 
-    if (current.failedRequestId) {
-      try {
-        await dependencies.continueThread(request.threadId, current.failedRequestId);
-      } catch {
-        throw new Error(
-          "BB released the old Claude runtime, but the failed turn could not restart. Send a message in this session to resume with the verified login.",
-        );
-      }
-      return { outcome: "retried" };
-    }
     return { outcome: "ready-next-message" };
   } finally {
     hostLocks.delete(initial.hostId);

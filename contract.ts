@@ -4,7 +4,6 @@ import { z } from "zod";
 const threadInput = z.object({ threadId: z.string().min(1) }).strict();
 const switchInput = threadInput
   .extend({
-    email: z.string().trim().email().max(254).optional(),
     mode: z.enum(["current", "login"]),
   })
   .strict();
@@ -38,7 +37,6 @@ export const rpcContract = defineRpcContract({
     input: switchInput,
     output: z.discriminatedUnion("outcome", [
       z.object({ outcome: z.literal("ready-next-message") }).strict(),
-      z.object({ outcome: z.literal("retried") }).strict(),
       z.object({ outcome: z.literal("login-changed-not-rebound") }).strict(),
     ]),
   },

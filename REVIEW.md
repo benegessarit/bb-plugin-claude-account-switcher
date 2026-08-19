@@ -3,7 +3,7 @@
 ## Review priorities
 
 1. A selected session must never be deliberately released when BB reports it active, starting, or stopping.
-2. A rate-limited turn must be retried only when its failed request identifier is unchanged.
+2. A failed turn must never be retried automatically; the next message starts after runtime release.
 3. Email, authorization codes, raw terminal output, credentials, and account identity must never be stored or logged.
 4. Cancellation must be truthful before and after successful machine-wide login.
 5. Visible workflow changes need focused component tests and an installed-plugin smoke.

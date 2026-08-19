@@ -4,8 +4,8 @@ This local BB plugin rebinds one existing Claude Code session to the verified Cl
 
 The header button has two paths:
 
-- **Use current login** verifies the machine's existing Claude subscription, releases only the selected session's loaded runtime, and either retries its exact rate-limited turn or waits for the next message.
-- **Sign in to another account** opens Claude's own subscription login in an isolated Chrome or Chromium profile with no existing account cookies. The email field is only an optional prefill.
+- **Use current login** verifies the machine's existing Claude subscription, releases only the selected session's loaded runtime, and waits for the next message.
+- **Sign in to another account** opens Claude's own subscription login in an isolated Chrome or Chromium profile with no existing account cookies. Account selection stays on Claude's website.
 
 Claude login remains machine-wide. Rebinding a BB session does not create per-session credential isolation. BB 0.38 also cannot atomically combine the plugin's final idle check with runtime release, so another sender can create a small race. The plugin refuses every state it observes as active, starting, or stopping.
 
@@ -17,7 +17,7 @@ Claude login remains machine-wide. Rebinding a BB session does not create per-se
 - Each account-changing login gets a unique temporary browser profile. BB removes it after that browser closes without touching regular browser data.
 - Account-changing login supports Chrome or Chromium on macOS and Linux. Other session machines get a clear refusal; current-login rebinding still works.
 - If BB cannot stop a login helper, every later switch on that machine is blocked until BB confirms that helper is closed.
-- Rate-limit retry requires the same failed request before and after login.
+- The plugin never retries a failed turn automatically; the next message starts a fresh runtime with the verified login.
 - A per-machine lock prevents overlapping login changes.
 
 ## Development

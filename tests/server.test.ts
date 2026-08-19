@@ -543,14 +543,6 @@ test("manual code submission and cancellation reach the active login", async () 
   const started = new Promise<void>((resolve) => {
     loginStarted = resolve;
   });
-  const recovery = {
-    candidate: {
-      failedRequestId: "req_1",
-      rateLimits: { providerId: "claude-code" },
-    },
-    hostId: "host_1",
-    reason: "manual-only",
-  };
   const host = createFakePluginHost({
     pluginId: "claude-account-switcher",
     sdk: {
@@ -583,7 +575,6 @@ test("manual code submission and cancellation reach the active login", async () 
           providerId: "claude-code",
           status: "idle" as const,
         }),
-        rateLimitRecovery: async () => recovery,
       },
     },
   });
@@ -592,7 +583,6 @@ test("manual code submission and cancellation reach the active login", async () 
 
   try {
     switching = host.harness.behavior.callRpc("switchAccount", {
-      email: "second+claude@example.com",
       mode: "login",
       threadId: "thread_1",
     });

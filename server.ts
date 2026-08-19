@@ -123,12 +123,9 @@ export default function plugin(bb: BbPluginApi) {
       return { submitted: true as const };
     },
 
-    async switchAccount({ email, mode, threadId }) {
+    async switchAccount({ mode, threadId }) {
       if (activeSwitches.has(threadId)) {
         throw new Error("A Claude account switch is already open for this session.");
-      }
-      if (mode === "current" && email !== undefined) {
-        throw new Error("Email is only used when signing in to another account.");
       }
 
       const controller = new AbortController();
@@ -147,15 +144,6 @@ export default function plugin(bb: BbPluginApi) {
       try {
         return await switchClaudeAccount(
           {
-            continueThread: async (targetThreadId, failedRequestId) => {
-              await bb.sdk.threads.continueAfterRateLimit({
-                threadId: targetThreadId,
-                failedRequestId,
-                mode: "manual",
-              });
-            },
-            getRecovery: (targetThreadId) =>
-              bb.sdk.threads.rateLimitRecovery({ threadId: targetThreadId }),
             getThread: async (targetThreadId) => {
               const target = await bb.sdk.threads.get({
                 include: "environment",
@@ -181,7 +169,7 @@ export default function plugin(bb: BbPluginApi) {
                       scope: { kind: "thread", threadId: targetId },
                       start: {
                         mode: "command",
-                        command: buildClaudeLoginCommand(email),
+                        command: buildClaudeLoginCommand(),
                       },
                       title: "Sign in to Claude",
                     });

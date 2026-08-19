@@ -146,8 +146,7 @@ browser.once("spawn", () => {
 });
 `;
 
-export function buildClaudeLoginCommand(email?: string): string {
-  const emailArgument = email?.trim() ? ` --email ${shellQuote(email.trim())}` : "";
+export function buildClaudeLoginCommand(): string {
   return [
     'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")"',
     'browser_launcher="$browser_dir/open-private-chrome"',
@@ -156,7 +155,7 @@ export function buildClaudeLoginCommand(email?: string): string {
     `/usr/bin/printf '%s' ${shellQuote(PRIVATE_BROWSER_SCRIPT)} > "$browser_launcher"`,
     '/bin/chmod 700 "$browser_launcher"',
     '("$browser_launcher" --check || exit 78)',
-    `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
+    'BROWSER="$browser_launcher" command claude auth login --claudeai >/dev/null 2>&1',
   ].join(" && ");
 }
 

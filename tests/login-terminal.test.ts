@@ -35,15 +35,14 @@ function client(
   };
 }
 
-test("the login command selects the target Claude subscription email", () => {
+test("the login command leaves account selection to Claude's website", () => {
   const buildCommand = Reflect.get(loginTerminal, "buildClaudeLoginCommand") as unknown;
   assert.equal(typeof buildCommand, "function");
 
-  const command = (buildCommand as (email: string) => string)(
-    "second+claude@example.com",
-  );
+  const command = (buildCommand as () => string)();
+  assert.equal(buildClaudeLoginCommand.length, 0);
   assert.match(command, /auth login --claudeai/);
-  assert.match(command, /--email 'second\+claude@example\.com'/);
+  assert.doesNotMatch(command, /--email/);
   assert.match(command, /mktemp -d/);
   assert.match(command, /BROWSER="\$browser_launcher"/);
   assert.match(command, /google-chrome-stable/);
@@ -335,7 +334,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
 
   const child = spawn(
     "/bin/sh",
-    ["-c", loginTerminal.buildClaudeAuthStatusCommand(200)],
+    ["-c", loginTerminal.buildClaudeAuthStatusCommand(1_000)],
     {
       detached: true,
       env: {

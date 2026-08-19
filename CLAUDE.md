@@ -2,13 +2,13 @@
 
 This plugin rebinds one BB Claude Code session to the verified subscription login on its exact machine.
 
-- Keep `Use current login` as the default. It must not open OAuth or require email.
-- Keep browser login optional. Email is only an optional prefill.
+- Keep `Use current login` as the default. It must not open OAuth.
+- Keep browser login optional. Account selection belongs on Claude's website.
 - Open account-changing login in a unique temporary Chrome or Chromium profile so no existing browser cookie can silently select the old account.
 - Support macOS and Linux session machines. Refuse account-changing login clearly when neither Chrome nor Chromium is available.
 - Never read credentials, Keychain, email identity, organization identity, or raw auth output.
 - Refuse active, starting, and stopping sessions before login or release.
-- Preserve exact failed-request matching and the per-machine lock.
+- Never retry a failed turn automatically. Preserve the per-machine lock.
 - Reconcile any failed helper-terminal cleanup before another switch can start on that machine.
 - Treat successful login exit as the irreversible commit point.
 - Keep errors inline while the dialog is open. Use toasts only after it closes.

@@ -22,7 +22,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const LOGIN_CHANGED_MESSAGE =
   "Claude sign-in finished, but BB could not verify that subscription for this session. The machine login may have changed; this session was not released.";
 
@@ -34,15 +33,12 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const [isClaude, setIsClaude] = useState(false);
   const [open, setOpen] = useState(false);
-  const [loginExpanded, setLoginExpanded] = useState(false);
   const [codeExpanded, setCodeExpanded] = useState(false);
   const [switchingMode, setSwitchingMode] = useState<"current" | "login" | null>(null);
   const [submittingCode, setSubmittingCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
   const [authorizationCode, setAuthorizationCode] = useState("");
   const cancelRequested = useRef(false);
-  const emailInputId = useId();
   const authorizationCodeInputId = useId();
 
   useEffect(() => {
@@ -65,7 +61,6 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
   const finishWith = (
     result:
       | { outcome: "ready-next-message" }
-      | { outcome: "retried" }
       | { outcome: "login-changed-not-rebound" },
   ) => {
     if (result.outcome === "login-changed-not-rebound") {
@@ -74,21 +69,11 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
       return;
     }
 
-    toast.success(
-      result.outcome === "retried"
-        ? "This session is retrying with the verified Claude subscription."
-        : "Ready. The next message will use the verified Claude subscription.",
-    );
+    toast.success("Ready. The next message will use the verified Claude subscription.");
     setOpen(false);
   };
 
   const startSwitch = async (mode: "current" | "login") => {
-    const targetEmail = email.trim();
-    if (mode === "login" && targetEmail && !EMAIL_PATTERN.test(targetEmail)) {
-      setError("Enter a valid email address or leave the prefill blank.");
-      return;
-    }
-
     cancelRequested.current = false;
     setAuthorizationCode("");
     setCodeExpanded(false);
@@ -96,7 +81,6 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
     setError(null);
     try {
       const result = await rpc.call("switchAccount", {
-        ...(mode === "login" && targetEmail ? { email: targetEmail } : {}),
         mode,
         threadId,
       });
@@ -130,7 +114,6 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
     setError(null);
     setAuthorizationCode("");
     setCodeExpanded(false);
-    setLoginExpanded(false);
     if (!switchingMode) return;
 
     cancelRequested.current = true;
@@ -195,69 +178,43 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
           </Button>
 
           <Button
-            aria-expanded={loginExpanded}
             className="w-full"
             disabled={switching}
-            onClick={() => setLoginExpanded((value) => !value)}
+            onClick={() => void startSwitch("login")}
             variant="outline"
           >
-            Sign in to another account
+            {switchingMode === "login"
+              ? "Waiting for Claude…"
+              : "Sign in to another account"}
           </Button>
 
-          {loginExpanded && (
+          {switchingMode === "login" && (
             <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium" htmlFor={emailInputId}>
-                  Email to prefill (optional)
-                </label>
-                <Input
-                  id={emailInputId}
-                  type="email"
-                  autoComplete="username"
-                  disabled={switching}
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                />
+              <p className="text-xs text-muted-foreground">
+                BB opens an isolated browser window with no existing account cookies.
+                Choose the account on Claude&apos;s website.
+              </p>
+
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Icon name="Loading" className="animate-spin" aria-hidden="true" />
+                  <span>Sign in to the account you want in the isolated window.</span>
+                </div>
                 <p className="text-xs text-muted-foreground">
-                  BB opens an isolated browser window with no existing account cookies.
-                  The email only pre-fills Claude&apos;s form.
+                  Claude may leave you on its home screen. Leave this dialog open; BB
+                  will finish when Claude Code confirms the login.
                 </p>
+                <Button
+                  aria-expanded={codeExpanded}
+                  onClick={() => setCodeExpanded((value) => !value)}
+                  size="sm"
+                  variant="ghost"
+                >
+                  Claude showed a code?
+                </Button>
               </div>
 
-              <Button
-                className="w-full"
-                disabled={switching}
-                onClick={() => void startSwitch("login")}
-                variant="secondary"
-              >
-                {switchingMode === "login"
-                  ? "Waiting for Claude…"
-                  : "Open isolated Claude login"}
-              </Button>
-
-              {switchingMode === "login" && (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Icon name="Loading" className="animate-spin" aria-hidden="true" />
-                    <span>Sign in to the account you want in the isolated window.</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Claude may leave you on its home screen. Leave this dialog open; BB
-                    will finish when Claude Code confirms the login.
-                  </p>
-                  <Button
-                    aria-expanded={codeExpanded}
-                    onClick={() => setCodeExpanded((value) => !value)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    Claude showed a code?
-                  </Button>
-                </div>
-              )}
-
-              {switchingMode === "login" && codeExpanded && (
+              {codeExpanded && (
                 <div className="space-y-1.5">
                   <label
                     className="text-sm font-medium"
