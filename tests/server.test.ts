@@ -400,6 +400,143 @@ test("plugin disposal retries terminal cleanup that failed during cancellation",
   ]);
 });
 
+test("a later switch reconciles failed login cleanup before it can start", async () => {
+  let createCount = 0;
+  let firstStarted!: () => void;
+  let secondStarted!: () => void;
+  const first = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const second = new Promise<void>((resolve) => {
+    secondStarted = resolve;
+  });
+  let closeAttempts = 0;
+  let closeAttemptsAtSecondStart = 0;
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw new Error("session machine disconnected");
+        },
+        create: async () => {
+          createCount += 1;
+          if (createCount === 1) firstStarted();
+          else {
+            closeAttemptsAtSecondStart = closeAttempts;
+            secondStarted();
+          }
+          return {
+            exitCode: null,
+            id: `login_terminal_${createCount}`,
+            status: "running" as const,
+          };
+        },
+        get: async ({ terminalId }) => ({
+          exitCode: null,
+          id: terminalId,
+          status: "running" as const,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+
+  const firstSwitch = host.harness.behavior.callRpc("switchAccount", {
+    mode: "login",
+    threadId: "thread_1",
+  });
+  await first;
+  await host.harness.behavior.callRpc("cancelSwitch", { threadId: "thread_1" });
+  await assert.rejects(firstSwitch, /cancelled/);
+  assert.equal(closeAttempts, 1);
+
+  const secondSwitch = host.harness.behavior.callRpc("switchAccount", {
+    mode: "login",
+    threadId: "thread_2",
+  });
+  await second;
+  assert.equal(createCount, 2);
+
+  await host.harness.behavior.callRpc("cancelSwitch", { threadId: "thread_2" });
+  await assert.rejects(secondSwitch, /cancelled/);
+  await host.harness.lifecycle.dispose();
+  assert.equal(closeAttemptsAtSecondStart, 2);
+});
+
+test("a later switch stays blocked while failed login cleanup is still unconfirmed", async () => {
+  let createCount = 0;
+  let loginStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    loginStarted = resolve;
+  });
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => {
+          throw new Error("session machine disconnected");
+        },
+        create: async () => {
+          createCount += 1;
+          loginStarted();
+          return {
+            exitCode: null,
+            id: "login_terminal",
+            status: "running" as const,
+          };
+        },
+        get: async () => ({
+          exitCode: null,
+          id: "login_terminal",
+          status: "running" as const,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+
+  const firstSwitch = host.harness.behavior.callRpc("switchAccount", {
+    mode: "login",
+    threadId: "thread_1",
+  });
+  await started;
+  await host.harness.behavior.callRpc("cancelSwitch", { threadId: "thread_1" });
+  await assert.rejects(firstSwitch, /cancelled/);
+  await assert.rejects(
+    host.harness.behavior.callRpc("submitLoginCode", {
+      code: "stale-code",
+      threadId: "thread_1",
+    }),
+    /No Claude login is waiting/,
+  );
+
+  await assert.rejects(
+    host.harness.behavior.callRpc("switchAccount", {
+      mode: "login",
+      threadId: "thread_2",
+    }),
+    /previous Claude login helper could not be stopped/,
+  );
+  assert.equal(createCount, 1);
+  await host.harness.lifecycle.dispose();
+});
+
 test("manual code submission and cancellation reach the active login", async () => {
   let terminalStatus: "running" | "disconnected" = "running";
   let loginStarted!: () => void;

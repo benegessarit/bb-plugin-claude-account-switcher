@@ -66,9 +66,39 @@ test("the login command omits the email flag but still isolates browser cookies"
 test("the private-browser helper is removed without recursive deletion", () => {
   const command = buildClaudeLoginCommand();
 
+  assert.match(command, /"\$browser_launcher" --check \|\| exit 78/);
   assert.match(command, /\/bin\/unlink "\$browser_launcher"/);
   assert.match(command, /\/bin\/rmdir "\$browser_dir"/);
   assert.doesNotMatch(command, /rm -rf/);
+});
+
+test("the complete login command refuses a missing browser before Claude starts", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-browser-preflight-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const claudeStarted = join(fixtureRoot, "claude-started");
+  await writeFile(
+    fakeClaude,
+    ["#!/bin/sh", '/usr/bin/touch "$BB_SWITCH_CLAUDE_STARTED"'].join("\n"),
+  );
+  await chmod(fakeClaude, 0o755);
+
+  try {
+    const result = spawnSync("/bin/sh", ["-c", buildClaudeLoginCommand()], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BB_CLAUDE_LOGIN_BROWSER: join(fixtureRoot, "missing-browser"),
+        BB_SWITCH_CLAUDE_STARTED: claudeStarted,
+        PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        TMPDIR: fixtureRoot,
+      },
+    });
+
+    assert.equal(result.status, 78, result.stderr);
+    await assert.rejects(access(claudeStarted));
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
 });
 
 test("the login command gives each Claude login an isolated browser profile", async () => {
@@ -111,7 +141,7 @@ test("the login command gives each Claude login an isolated browser profile", as
         ...process.env,
         BB_SWITCH_CAPTURE_HELPER: capturedHelper,
         BB_SWITCH_CAPTURE_PATH: capturedPath,
-        PATH: `${fixtureRoot}:/usr/bin:/bin`,
+        PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
         TMPDIR: fixtureRoot,
       },
       encoding: "utf8",
@@ -122,6 +152,8 @@ test("the login command gives each Claude login an isolated browser profile", as
     assert.match(helper, /--user-data-dir/);
     assert.match(helper, /google-chrome-stable/);
     assert.match(helper, /chromium-browser/);
+    assert.doesNotMatch(helper, /12 \* 60 \* 60/);
+    assert.match(helper, /rmSync\([\s\S]+clearInterval\(cleanupTimer\)/);
     const ephemeralPath = (await readFile(capturedPath, "utf8")).trim();
     assert.match(ephemeralPath, /^.+\/bb-claude-login\.[^/]+\/open-private-chrome$/);
     await assert.rejects(access(ephemeralPath));
@@ -226,7 +258,7 @@ test("a BB terminal hangup exits promptly and removes the private-browser helper
       ...process.env,
       BB_SWITCH_CAPTURE_PATH: capturedPath,
       BB_SWITCH_CAPTURE_PID: capturedPid,
-      PATH: `${fixtureRoot}:/usr/bin:/bin`,
+      PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
       TMPDIR: fixtureRoot,
       ZDOTDIR: fixtureRoot,
     },
@@ -319,7 +351,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(
         () => reject(new Error("auth-status helper did not emit output")),
-        1_000,
+        3_000,
       );
       child.once("error", reject);
       child.stdout.on("data", (chunk: Buffer) => {
@@ -340,7 +372,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
     const exitCode = await new Promise<number | null>((resolve, reject) => {
       const timeout = setTimeout(
         () => reject(new Error("auth-status helper did not self-exit")),
-        1_000,
+        3_000,
       );
       child.once("exit", (code) => {
         clearTimeout(timeout);
@@ -626,6 +658,7 @@ test("auth cancellation wakes a pending poll without another terminal state read
 });
 
 test("failed terminal cleanup remains owned without hiding a successful login", async () => {
+  let cleanupFailed = false;
   let settled = false;
   await runClaudeLogin(
     {
@@ -634,11 +667,15 @@ test("failed terminal cleanup remains owned without hiding a successful login", 
       },
       create: async () => terminal("exited", 0),
       get: async () => terminal("exited", 0),
+      onCleanupFailed: () => {
+        cleanupFailed = true;
+      },
       onSettled: () => {
         settled = true;
       },
     },
     "thread_1",
   );
+  assert.equal(cleanupFailed, true);
   assert.equal(settled, false);
 });

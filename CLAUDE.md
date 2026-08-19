@@ -9,6 +9,7 @@ This plugin rebinds one BB Claude Code session to the verified subscription logi
 - Never read credentials, Keychain, email identity, organization identity, or raw auth output.
 - Refuse active, starting, and stopping sessions before login or release.
 - Preserve exact failed-request matching and the per-machine lock.
+- Reconcile any failed helper-terminal cleanup before another switch can start on that machine.
 - Treat successful login exit as the irreversible commit point.
 - Keep errors inline while the dialog is open. Use toasts only after it closes.
 - Use BB theme tokens and its native tooltip. Keep the header control quiet and compact.

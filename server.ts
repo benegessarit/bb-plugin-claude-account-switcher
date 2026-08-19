@@ -29,7 +29,9 @@ export default function plugin(bb: BbPluginApi) {
   const hostLocks = new Set<string>();
   const activeLoginTerminals = new Map<string, string>();
   const activeTerminals = new Set<string>();
+  const uncleanTerminals = new Map<string, string>();
   const activeSwitches = new Map<string, ActiveSwitch>();
+  const cleanupReconciliations = new Map<string, Promise<void>>();
 
   async function closeTerminal(
     terminalId: string,
@@ -38,10 +40,45 @@ export default function plugin(bb: BbPluginApi) {
     await bb.sdk.terminals.close({ terminalId, mode });
   }
 
-  function settleTerminal(threadId: string, terminalId: string): void {
+  function settleTerminal(terminalId: string): void {
     activeTerminals.delete(terminalId);
-    if (activeLoginTerminals.get(threadId) === terminalId) {
-      activeLoginTerminals.delete(threadId);
+    uncleanTerminals.delete(terminalId);
+    for (const [threadId, activeTerminalId] of activeLoginTerminals) {
+      if (activeTerminalId === terminalId) activeLoginTerminals.delete(threadId);
+    }
+  }
+
+  async function reconcileFailedCleanup(hostId: string): Promise<void> {
+    const terminalIds = [...uncleanTerminals]
+      .filter(([, terminalHostId]) => terminalHostId === hostId)
+      .map(([terminalId]) => terminalId);
+    if (terminalIds.length === 0) return;
+    const activeReconciliation = cleanupReconciliations.get(hostId);
+    if (activeReconciliation) return activeReconciliation;
+
+    const reconciliation = (async () => {
+      let cleanupFailed = false;
+      for (const terminalId of terminalIds) {
+        try {
+          await closeTerminal(terminalId, "force");
+          settleTerminal(terminalId);
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (cleanupFailed) {
+        throw new Error(
+          "A previous Claude login helper could not be stopped. Reconnect its machine, then try again.",
+        );
+      }
+    })();
+    cleanupReconciliations.set(hostId, reconciliation);
+    try {
+      await reconciliation;
+    } finally {
+      if (cleanupReconciliations.get(hostId) === reconciliation) {
+        cleanupReconciliations.delete(hostId);
+      }
     }
   }
 
@@ -69,8 +106,14 @@ export default function plugin(bb: BbPluginApi) {
     },
 
     async submitLoginCode({ code, threadId }) {
+      const active = activeSwitches.get(threadId);
       const terminalId = activeLoginTerminals.get(threadId);
-      if (!terminalId) {
+      if (
+        !terminalId ||
+        !active ||
+        active.mode !== "login" ||
+        active.phase !== "cancellable"
+      ) {
         throw new Error("No Claude login is waiting for an authorization code.");
       }
       await bb.sdk.terminals.input({
@@ -127,7 +170,7 @@ export default function plugin(bb: BbPluginApi) {
                 status: target.status,
               };
             },
-            login: async (targetThreadId, signal, onSuccess) => {
+            login: async (targetThreadId, hostId, signal, onSuccess) => {
               await runClaudeLogin(
                 {
                   close: closeTerminal,
@@ -147,12 +190,15 @@ export default function plugin(bb: BbPluginApi) {
                     return terminal;
                   },
                   get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onSettled: (terminalId) => settleTerminal(targetThreadId, terminalId),
+                  onCleanupFailed: (terminalId) =>
+                    uncleanTerminals.set(terminalId, hostId),
+                  onSettled: settleTerminal,
                 },
                 targetThreadId,
                 { onSuccess, signal },
               );
             },
+            reconcileCleanup: reconcileFailedCleanup,
             stopThread: async (targetThreadId) => {
               await bb.sdk.threads.stop({ threadId: targetThreadId });
             },
@@ -182,7 +228,9 @@ export default function plugin(bb: BbPluginApi) {
                     return terminal;
                   },
                   get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onSettled: (terminalId) => settleTerminal(targetThreadId, terminalId),
+                  onCleanupFailed: (terminalId) =>
+                    uncleanTerminals.set(terminalId, hostId),
+                  onSettled: settleTerminal,
                   output: async (terminalId) => {
                     const output = await bb.sdk.terminals.output({
                       limitChunks: 8,
@@ -233,6 +281,8 @@ export default function plugin(bb: BbPluginApi) {
     );
     activeLoginTerminals.clear();
     activeTerminals.clear();
+    uncleanTerminals.clear();
+    cleanupReconciliations.clear();
     hostLocks.clear();
     activeSwitches.clear();
   });

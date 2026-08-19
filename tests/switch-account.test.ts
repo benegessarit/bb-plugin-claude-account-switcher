@@ -54,10 +54,11 @@ function dependencies(
       events.push("thread");
       return thread();
     },
-    login: async (_threadId, _signal, onSuccess) => {
+    login: async (_threadId, _hostId, _signal, onSuccess) => {
       events.push("login");
       onSuccess?.();
     },
+    reconcileCleanup: async () => undefined,
     stopThread: async () => {
       events.push("stop");
     },
@@ -271,7 +272,7 @@ test("login success commits before auth verification and ignores a late cancel",
   const events: string[] = [];
   const controller = new AbortController();
   const deps = dependencies(events, {
-    login: async (_threadId, _signal, onSuccess) => {
+    login: async (_threadId, _hostId, _signal, onSuccess) => {
       events.push("login");
       onSuccess?.();
       controller.abort();

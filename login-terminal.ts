@@ -85,7 +85,6 @@ function watchAndRemoveProfile(profileRoot, browserPid) {
       return;
     }
     if (Date.now() - lastActiveAt < 750) return;
-    clearInterval(cleanupTimer);
     try {
       fs.rmSync(target, {
         force: true,
@@ -93,14 +92,19 @@ function watchAndRemoveProfile(profileRoot, browserPid) {
         recursive: true,
         retryDelay: 100,
       });
-    } catch {}
+      clearInterval(cleanupTimer);
+      process.exit(0);
+    } catch {
+      // Keep ownership and retry until this exact temporary profile is gone.
+    }
   }, 100);
-  setTimeout(() => process.exit(0), 12 * 60 * 60 * 1000).unref();
 }
 
 const browserPath = findBrowser();
+if (!browserPath) process.exit(78);
+if (process.argv[2] === "--check") process.exit(0);
 const targetUrl = process.argv[2];
-if (!browserPath || !targetUrl) process.exit(78);
+if (!targetUrl) process.exit(78);
 
 const profileRoot = mkdtempSync(join(tmpdir(), "bb-claude-browser-"));
 chmodSync(profileRoot, 0o700);
@@ -151,6 +155,7 @@ export function buildClaudeLoginCommand(email?: string): string {
     "trap cleanup_browser_launcher EXIT",
     `/usr/bin/printf '%s' ${shellQuote(PRIVATE_BROWSER_SCRIPT)} > "$browser_launcher"`,
     '/bin/chmod 700 "$browser_launcher"',
+    '("$browser_launcher" --check || exit 78)',
     `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
   ].join(" && ");
 }
@@ -227,6 +232,7 @@ export interface LoginTerminalClient {
   close(terminalId: string, mode: "force" | "if-clean"): Promise<void>;
   create(threadId: string): Promise<LoginTerminal>;
   get(terminalId: string): Promise<LoginTerminal>;
+  onCleanupFailed?(terminalId: string): void;
   onSettled?(terminalId: string): void;
 }
 
@@ -329,6 +335,7 @@ export async function runClaudeLogin(
       // Closing an already-exited helper terminal is best-effort cleanup. It
       // must not turn a successful login into a false failure. A failed close
       // stays owned so plugin disposal can retry it.
+      client.onCleanupFailed?.(terminal.id);
     }
   }
 }
@@ -375,6 +382,7 @@ export async function runClaudeAuthStatus(
     } catch {
       // Best-effort cleanup must not hide the auth classification result. A
       // failed close stays owned so plugin disposal can retry it.
+      client.onCleanupFailed?.(terminal.id);
     }
   }
 }

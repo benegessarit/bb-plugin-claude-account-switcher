@@ -20,7 +20,13 @@ export interface AccountSwitchDependencies {
   continueThread(threadId: string, failedRequestId: string): Promise<void>;
   getRecovery(threadId: string): Promise<RecoverySnapshot>;
   getThread(threadId: string): Promise<ThreadSnapshot>;
-  login(threadId: string, signal: AbortSignal, onSuccess?: () => void): Promise<void>;
+  login(
+    threadId: string,
+    hostId: string,
+    signal: AbortSignal,
+    onSuccess?: () => void,
+  ): Promise<void>;
+  reconcileCleanup(hostId: string): Promise<void>;
   stopThread(threadId: string): Promise<void>;
   verifySubscription(threadId: string, hostId: string): Promise<void>;
 }
@@ -112,6 +118,7 @@ export async function switchClaudeAccount(
 > {
   throwIfCancelled(signal);
   const initial = await classifySession(dependencies, request.threadId);
+  await dependencies.reconcileCleanup(initial.hostId);
   if (hostLocks.has(initial.hostId)) {
     throw new Error("A Claude account switch is already open on this machine.");
   }
@@ -119,7 +126,12 @@ export async function switchClaudeAccount(
   hostLocks.add(initial.hostId);
   try {
     if (request.mode === "login") {
-      await dependencies.login(request.threadId, signal, lifecycle.markCommitted);
+      await dependencies.login(
+        request.threadId,
+        initial.hostId,
+        signal,
+        lifecycle.markCommitted,
+      );
     }
 
     try {

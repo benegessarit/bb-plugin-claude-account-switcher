@@ -16,6 +16,7 @@ Claude login remains machine-wide. Rebinding a BB session does not create per-se
 - Email and authorization codes stay transient and are never stored or logged.
 - Each account-changing login gets a unique temporary browser profile. BB removes it after that browser closes without touching regular browser data.
 - Account-changing login supports Chrome or Chromium on macOS and Linux. Other session machines get a clear refusal; current-login rebinding still works.
+- If BB cannot stop a login helper, every later switch on that machine is blocked until BB confirms that helper is closed.
 - Rate-limit retry requires the same failed request before and after login.
 - A per-machine lock prevents overlapping login changes.
 
