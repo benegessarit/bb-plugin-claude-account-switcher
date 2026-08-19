@@ -181,6 +181,115 @@ test("a mismatched helper reserves its actual machine until cleanup finishes", a
   }
 });
 
+test("overlapping mismatched helpers retain independent actual-host reservations", async () => {
+  let releaseFirstClose!: () => void;
+  const firstCloseReleased = new Promise<void>((resolve) => {
+    releaseFirstClose = resolve;
+  });
+  let firstCloseStarted!: () => void;
+  const firstClosing = new Promise<void>((resolve) => {
+    firstCloseStarted = resolve;
+  });
+  let releaseSecondClose!: () => void;
+  const secondCloseReleased = new Promise<void>((resolve) => {
+    releaseSecondClose = resolve;
+  });
+  let secondCloseStarted!: () => void;
+  const secondClosing = new Promise<void>((resolve) => {
+    secondCloseStarted = resolve;
+  });
+  let creates = 0;
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async ({ terminalId }) => {
+          if (terminalId === "status_terminal_1") {
+            firstCloseStarted();
+            await firstCloseReleased;
+          } else {
+            secondCloseStarted();
+            await secondCloseReleased;
+          }
+          return {
+            exitCode: 1,
+            hostId: "host_2",
+            id: terminalId,
+            status: "exited" as const,
+          };
+        },
+        create: async () => {
+          creates += 1;
+          if (creates > 2) throw new Error("third helper launched");
+          return {
+            exitCode: null,
+            hostId: "host_2",
+            id: `status_terminal_${creates}`,
+            status: "running" as const,
+          };
+        },
+      },
+      threads: {
+        get: async ({ threadId }) => ({
+          environment: {
+            hostId:
+              threadId === "thread_1"
+                ? "host_1"
+                : threadId === "thread_2"
+                  ? "host_3"
+                  : "host_2",
+          },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+  const firstSwitch = host.harness.behavior.callRpc("switchAccount", {
+    mode: "current",
+    threadId: "thread_1",
+  });
+  let secondSwitch: Promise<unknown> | undefined;
+
+  try {
+    await firstClosing;
+    secondSwitch = host.harness.behavior.callRpc("switchAccount", {
+      mode: "current",
+      threadId: "thread_2",
+    });
+    await secondClosing;
+
+    releaseFirstClose();
+    await assert.rejects(firstSwitch, /different machine/);
+    await assert.rejects(
+      host.harness.behavior.callRpc("switchAccount", {
+        mode: "current",
+        threadId: "thread_3",
+      }),
+      /already open on this machine/,
+    );
+    assert.equal(creates, 2);
+
+    releaseSecondClose();
+    await assert.rejects(secondSwitch, /different machine/);
+    await assert.rejects(
+      host.harness.behavior.callRpc("switchAccount", {
+        mode: "current",
+        threadId: "thread_3",
+      }),
+      /third helper launched/,
+    );
+    assert.equal(creates, 3);
+  } finally {
+    releaseFirstClose();
+    releaseSecondClose();
+    await firstSwitch.catch(() => undefined);
+    await secondSwitch?.catch(() => undefined);
+    await host.harness.lifecycle.dispose();
+  }
+});
+
 test("failed mismatch persistence still allows cleanup reconciliation", async () => {
   let closeAttempts = 0;
   let creates = 0;
