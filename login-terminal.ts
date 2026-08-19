@@ -2,20 +2,154 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
 
+const PRIVATE_BROWSER_SCRIPT = `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { accessSync, chmodSync, constants, mkdtempSync, rmSync } = require("node:fs");
+const { delimiter, dirname, isAbsolute, join, resolve } = require("node:path");
+const { homedir, tmpdir } = require("node:os");
+
+function executablePath(command) {
+  const candidates =
+    isAbsolute(command) || command.includes("/")
+      ? [resolve(command)]
+      : (process.env.PATH || "")
+          .split(delimiter)
+          .filter(Boolean)
+          .map((directory) => join(directory, command));
+  return candidates.find((candidate) => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function findBrowser() {
+  const override = process.env.BB_CLAUDE_LOGIN_BROWSER;
+  if (override) return executablePath(override);
+
+  const candidates =
+    process.platform === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          join(homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+          join(homedir(), "Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ]
+      : process.platform === "linux"
+        ? ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]
+        : [];
+  return candidates.map(executablePath).find(Boolean);
+}
+
+function removeOwnedProfile(profileRoot) {
+  const base = resolve(tmpdir());
+  const target = resolve(profileRoot);
+  if (dirname(target) !== base || !target.startsWith(join(base, "bb-claude-browser-"))) {
+    return;
+  }
+  try {
+    rmSync(target, { force: true, maxRetries: 3, recursive: true, retryDelay: 100 });
+  } catch {}
+}
+
+function watchAndRemoveProfile(profileRoot, browserPid) {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const base = path.resolve(os.tmpdir());
+  const target = path.resolve(profileRoot);
+  if (
+    path.dirname(target) !== base ||
+    !path.basename(target).startsWith("bb-claude-browser-") ||
+    !Number.isSafeInteger(browserPid) ||
+    browserPid <= 0
+  ) {
+    process.exit(78);
+  }
+
+  const browserIsRunning = () => {
+    try {
+      process.kill(browserPid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let lastActiveAt = Date.now();
+  const cleanupTimer = setInterval(() => {
+    if (browserIsRunning() || fs.existsSync(path.join(target, "SingletonLock"))) {
+      lastActiveAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastActiveAt < 750) return;
+    clearInterval(cleanupTimer);
+    try {
+      fs.rmSync(target, {
+        force: true,
+        maxRetries: 3,
+        recursive: true,
+        retryDelay: 100,
+      });
+    } catch {}
+  }, 100);
+  setTimeout(() => process.exit(0), 12 * 60 * 60 * 1000).unref();
+}
+
+const browserPath = findBrowser();
+const targetUrl = process.argv[2];
+if (!browserPath || !targetUrl) process.exit(78);
+
+const profileRoot = mkdtempSync(join(tmpdir(), "bb-claude-browser-"));
+chmodSync(profileRoot, 0o700);
+const browser = spawn(
+  browserPath,
+  [
+    "--user-data-dir=" + profileRoot,
+    "--incognito",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--new-window",
+    targetUrl,
+  ],
+  { detached: true, stdio: "ignore" },
+);
+
+const fail = () => {
+  removeOwnedProfile(profileRoot);
+  process.exit(78);
+};
+browser.once("error", fail);
+browser.once("spawn", () => {
+  const watcherSource =
+    "(" + watchAndRemoveProfile.toString() + ")(process.argv[1],Number(process.argv[2]))";
+  const watcher = spawn(
+    process.execPath,
+    ["-e", watcherSource, profileRoot, String(browser.pid)],
+    { detached: true, stdio: "ignore" },
+  );
+  watcher.once("error", () => {
+    browser.kill();
+    fail();
+  });
+  watcher.once("spawn", () => {
+    watcher.unref();
+    browser.unref();
+    process.exit(0);
+  });
+});
+`;
+
 export function buildClaudeLoginCommand(email?: string): string {
   const emailArgument = email?.trim() ? ` --email ${shellQuote(email.trim())}` : "";
-  const privateBrowserScript = [
-    "#!/bin/sh",
-    `exec /usr/bin/open -na 'Google Chrome' --args --incognito "$1"`,
-  ]
-    .map(shellQuote)
-    .join(" ");
   return [
     'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")"',
     'browser_launcher="$browser_dir/open-private-chrome"',
     'cleanup_browser_launcher() { /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }',
     "trap cleanup_browser_launcher EXIT",
-    `/usr/bin/printf '%s\\n' ${privateBrowserScript} > "$browser_launcher"`,
+    `/usr/bin/printf '%s' ${shellQuote(PRIVATE_BROWSER_SCRIPT)} > "$browser_launcher"`,
     '/bin/chmod 700 "$browser_launcher"',
     `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
   ].join(" && ");
@@ -162,6 +296,11 @@ export async function runClaudeLogin(
           options.onSuccess?.();
           return;
         }
+        if (current.exitCode === 78) {
+          throw new Error(
+            "Account-changing login requires Google Chrome or Chromium on this session's macOS or Linux machine. This BB session was not changed.",
+          );
+        }
         throw new Error(
           "Claude login did not finish successfully. This BB session was not changed.",
         );
@@ -185,11 +324,11 @@ export async function runClaudeLogin(
   } finally {
     try {
       await client.close(terminal.id, closeMode);
+      client.onSettled?.(terminal.id);
     } catch {
       // Closing an already-exited helper terminal is best-effort cleanup. It
-      // must not turn a successful login into a false failure.
-    } finally {
-      client.onSettled?.(terminal.id);
+      // must not turn a successful login into a false failure. A failed close
+      // stays owned so plugin disposal can retry it.
     }
   }
 }
@@ -232,10 +371,10 @@ export async function runClaudeAuthStatus(
   } finally {
     try {
       await client.close(terminal.id, "force");
-    } catch {
-      // Best-effort cleanup must not hide the auth classification result.
-    } finally {
       client.onSettled?.(terminal.id);
+    } catch {
+      // Best-effort cleanup must not hide the auth classification result. A
+      // failed close stays owned so plugin disposal can retry it.
     }
   }
 }

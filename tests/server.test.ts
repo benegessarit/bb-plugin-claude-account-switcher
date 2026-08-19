@@ -340,6 +340,66 @@ test("plugin disposal cancels and closes an active login helper", async () => {
   ]);
 });
 
+test("plugin disposal retries terminal cleanup that failed during cancellation", async () => {
+  let loginStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    loginStarted = resolve;
+  });
+  let closeAttempts = 0;
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw new Error("session machine disconnected");
+        },
+        create: async () => {
+          loginStarted();
+          return {
+            exitCode: null,
+            id: "login_terminal",
+            status: "running" as const,
+          };
+        },
+        get: async () => ({
+          exitCode: null,
+          id: "login_terminal",
+          status: "running" as const,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+  const switching = host.harness.behavior.callRpc("switchAccount", {
+    mode: "login",
+    threadId: "thread_1",
+  });
+  await started;
+
+  const cancelled = await host.harness.behavior.callRpc("cancelSwitch", {
+    threadId: "thread_1",
+  });
+  assert.deepEqual(cancelled, { outcome: "cancelled-before-login" });
+  await assert.rejects(switching, /cancelled/);
+  assert.equal(closeAttempts, 1);
+
+  await host.harness.lifecycle.dispose();
+
+  assert.equal(closeAttempts, 2);
+  assert.deepEqual(host.harness.inspection.sdk.callsTo("terminals.close"), [
+    [{ mode: "force", terminalId: "login_terminal" }],
+    [{ mode: "force", terminalId: "login_terminal" }],
+  ]);
+});
+
 test("manual code submission and cancellation reach the active login", async () => {
   let terminalStatus: "running" | "disconnected" = "running";
   let loginStarted!: () => void;

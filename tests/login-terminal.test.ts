@@ -46,7 +46,9 @@ test("the login command selects the target Claude subscription email", () => {
   assert.match(command, /--email 'second\+claude@example\.com'/);
   assert.match(command, /mktemp -d/);
   assert.match(command, /BROWSER="\$browser_launcher"/);
-  assert.match(command, /Google Chrome/);
+  assert.match(command, /google-chrome-stable/);
+  assert.match(command, /chromium-browser/);
+  assert.match(command, /--user-data-dir/);
   assert.match(command, /--incognito/);
   assert.match(command, />\/dev\/null 2>&1/);
 });
@@ -56,6 +58,8 @@ test("the login command omits the email flag but still isolates browser cookies"
 
   assert.doesNotMatch(command, /--email/);
   assert.match(command, /BROWSER="\$browser_launcher"/);
+  assert.match(command, /bb-claude-browser-/);
+  assert.match(command, /--user-data-dir/);
   assert.match(command, /--incognito/);
 });
 
@@ -67,9 +71,10 @@ test("the private-browser helper is removed without recursive deletion", () => {
   assert.doesNotMatch(command, /rm -rf/);
 });
 
-test("the login command gives Claude a working ephemeral private-browser helper", async () => {
+test("the login command gives each Claude login an isolated browser profile", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-private-browser-"));
   const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "fake-browser");
   const capturedHelper = join(fixtureRoot, "captured-helper");
   const capturedPath = join(fixtureRoot, "captured-path");
   await writeFile(
@@ -81,6 +86,24 @@ test("the login command gives Claude a working ephemeral private-browser helper"
     ].join("\n"),
   );
   await chmod(fakeClaude, 0o755);
+  await writeFile(
+    fakeBrowser,
+    [
+      "#!/bin/sh",
+      ': > "$BB_SWITCH_BROWSER_ARGS"',
+      'profile_dir=""',
+      'for argument in "$@"; do',
+      '  /usr/bin/printf \'%s\\n\' "$argument" >> "$BB_SWITCH_BROWSER_ARGS"',
+      '  case "$argument" in --user-data-dir=*) profile_dir="${argument#--user-data-dir=}" ;; esac',
+      "done",
+      'test -n "$profile_dir" || exit 2',
+      '/usr/bin/touch "$profile_dir/SingletonLock"',
+      '/usr/bin/touch "$BB_SWITCH_BROWSER_READY"',
+      'while test ! -f "$BB_SWITCH_BROWSER_RELEASE"; do /bin/sleep 0.02; done',
+      '/bin/unlink "$profile_dir/SingletonLock"',
+    ].join("\n"),
+  );
+  await chmod(fakeBrowser, 0o755);
 
   try {
     const result = spawnSync("/bin/sh", ["-c", buildClaudeLoginCommand()], {
@@ -95,13 +118,88 @@ test("the login command gives Claude a working ephemeral private-browser helper"
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(
-      await readFile(capturedHelper, "utf8"),
-      /open -na 'Google Chrome' --args --incognito "\$1"/,
-    );
+    const helper = await readFile(capturedHelper, "utf8");
+    assert.match(helper, /--user-data-dir/);
+    assert.match(helper, /google-chrome-stable/);
+    assert.match(helper, /chromium-browser/);
     const ephemeralPath = (await readFile(capturedPath, "utf8")).trim();
     assert.match(ephemeralPath, /^.+\/bb-claude-login\.[^/]+\/open-private-chrome$/);
     await assert.rejects(access(ephemeralPath));
+
+    const launch = async (suffix: string) => {
+      const argsPath = join(fixtureRoot, `browser-args-${suffix}`);
+      const readyPath = join(fixtureRoot, `browser-ready-${suffix}`);
+      const releasePath = join(fixtureRoot, `browser-release-${suffix}`);
+      const launched = spawnSync(
+        capturedHelper,
+        ["https://claude.ai/oauth/authorize"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            BB_CLAUDE_LOGIN_BROWSER: fakeBrowser,
+            BB_SWITCH_BROWSER_ARGS: argsPath,
+            BB_SWITCH_BROWSER_READY: readyPath,
+            BB_SWITCH_BROWSER_RELEASE: releasePath,
+            PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+            TMPDIR: fixtureRoot,
+          },
+        },
+      );
+      assert.equal(launched.status, 0, launched.stderr);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          await access(readyPath);
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      const args = (await readFile(argsPath, "utf8")).trim().split("\n");
+      const profileArgument = args.find((argument) =>
+        argument.startsWith("--user-data-dir="),
+      );
+      assert.ok(profileArgument);
+      return {
+        profileDir: profileArgument.slice("--user-data-dir=".length),
+        releasePath,
+      };
+    };
+
+    const first = await launch("first");
+    const second = await launch("second");
+    assert.notEqual(first.profileDir, second.profileDir);
+    assert.match(first.profileDir, /^.+\/bb-claude-browser-[^/]+$/);
+    assert.match(second.profileDir, /^.+\/bb-claude-browser-[^/]+$/);
+
+    await writeFile(first.releasePath, "release\n");
+    await writeFile(second.releasePath, "release\n");
+    for (const profileDir of [first.profileDir, second.profileDir]) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          await access(profileDir);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        } catch {
+          break;
+        }
+      }
+      await assert.rejects(access(profileDir));
+    }
+
+    const unsupported = spawnSync(
+      capturedHelper,
+      ["https://claude.ai/oauth/authorize"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BB_CLAUDE_LOGIN_BROWSER: join(fixtureRoot, "missing-browser"),
+          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+          TMPDIR: fixtureRoot,
+        },
+      },
+    );
+    assert.equal(unsupported.status, 78);
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
   }
@@ -403,6 +501,17 @@ test("a failed terminal login does not report success", async () => {
   assert.deepEqual(closes, ["if-clean"]);
 });
 
+test("an unsupported session browser produces a clear account-login error", async () => {
+  const closes: Array<"force" | "if-clean"> = [];
+  const states = [terminal("exited", 78)];
+
+  await assert.rejects(
+    runClaudeLogin(client(states, closes), "thread_1"),
+    /requires Google Chrome or Chromium on this session's macOS or Linux machine/,
+  );
+  assert.deepEqual(closes, ["if-clean"]);
+});
+
 test("a timed-out login is force-closed", async () => {
   const closes: Array<"force" | "if-clean"> = [];
   const states = [terminal("running")];
@@ -516,7 +625,7 @@ test("auth cancellation wakes a pending poll without another terminal state read
   assert.equal(stateReads, 0);
 });
 
-test("terminal cleanup cannot turn a successful login into a failure", async () => {
+test("failed terminal cleanup remains owned without hiding a successful login", async () => {
   let settled = false;
   await runClaudeLogin(
     {
@@ -531,5 +640,5 @@ test("terminal cleanup cannot turn a successful login into a failure", async () 
     },
     "thread_1",
   );
-  assert.equal(settled, true);
+  assert.equal(settled, false);
 });

@@ -220,8 +220,8 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
                   onChange={(event) => setEmail(event.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  BB opens a private Chrome window so Claude cannot reuse the account in
-                  your regular window. The email only pre-fills Claude&apos;s form.
+                  BB opens an isolated browser window with no existing account cookies.
+                  The email only pre-fills Claude&apos;s form.
                 </p>
               </div>
 
@@ -233,14 +233,14 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
               >
                 {switchingMode === "login"
                   ? "Waiting for Claude…"
-                  : "Open private Claude login"}
+                  : "Open isolated Claude login"}
               </Button>
 
               {switchingMode === "login" && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Icon name="Loading" className="animate-spin" aria-hidden="true" />
-                    <span>Sign in to the account you want in the private window.</span>
+                    <span>Sign in to the account you want in the isolated window.</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Claude may leave you on its home screen. Leave this dialog open; BB
