@@ -5,6 +5,7 @@ import {
   buildClaudeLoginCommand,
   runClaudeAuthStatus,
   runClaudeLogin,
+  type LoginTerminal,
 } from "./login-terminal";
 import { switchClaudeAccount } from "./switch-account";
 
@@ -22,6 +23,18 @@ interface ActiveSwitch {
   readonly mode: "current" | "login";
   readonly settled: Promise<void>;
   phase: SwitchPhase;
+}
+
+function settledCancellationOutcome(active: ActiveSwitch) {
+  if (active.phase === "committed") {
+    return { outcome: "completing" as const };
+  }
+  return {
+    outcome:
+      active.mode === "login"
+        ? ("cancelled-before-login" as const)
+        : ("cancelled-before-release" as const),
+  };
 }
 
 function decodeTerminalOutput(
@@ -86,8 +99,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function closeTerminal(
     terminalId: string,
     mode: "force" | "if-clean",
-  ): Promise<void> {
-    await bb.sdk.terminals.close({ terminalId, mode });
+  ): Promise<LoginTerminal> {
+    return bb.sdk.terminals.close({ terminalId, mode });
   }
 
   async function settleTerminal(terminalId: string): Promise<void> {
@@ -113,12 +126,21 @@ export default async function plugin(bb: BbPluginApi) {
     expectedHostId: string,
   ): Promise<void> {
     if (terminal.hostId === expectedHostId) return;
+    const reservedActualHost = !hostLocks.has(terminal.hostId);
+    if (reservedActualHost) hostLocks.add(terminal.hostId);
     activeTerminals.add(terminal.id);
+    let cleanupSecured = false;
     try {
       await closeTerminal(terminal.id, "force");
       await settleTerminal(terminal.id);
+      cleanupSecured = true;
     } catch {
       await markUncleanTerminal(terminal.id, terminal.hostId);
+      cleanupSecured = true;
+    } finally {
+      if (reservedActualHost && cleanupSecured) {
+        hostLocks.delete(terminal.hostId);
+      }
     }
     throw new Error("BB opened the Claude helper on a different machine.");
   }
@@ -169,23 +191,13 @@ export default async function plugin(bb: BbPluginApi) {
       }
       if (active.phase === "cancelling") {
         await active.settled;
-        return {
-          outcome:
-            active.mode === "login"
-              ? ("cancelled-before-login" as const)
-              : ("cancelled-before-release" as const),
-        };
+        return settledCancellationOutcome(active);
       }
 
       active.phase = "cancelling";
       active.controller.abort();
       await active.settled;
-      return {
-        outcome:
-          active.mode === "login"
-            ? ("cancelled-before-login" as const)
-            : ("cancelled-before-release" as const),
-      };
+      return settledCancellationOutcome(active);
     },
 
     async inspectThread({ threadId }) {

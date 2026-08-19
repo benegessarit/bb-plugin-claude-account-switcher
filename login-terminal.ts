@@ -227,7 +227,7 @@ export interface LoginTerminal {
 }
 
 export interface LoginTerminalClient {
-  close(terminalId: string, mode: "force" | "if-clean"): Promise<void>;
+  close(terminalId: string, mode: "force" | "if-clean"): Promise<LoginTerminal>;
   create(threadId: string): Promise<LoginTerminal>;
   get(terminalId: string): Promise<LoginTerminal>;
   onCleanupFailed?(terminalId: string, hostId: string): Promise<void> | void;
@@ -290,55 +290,89 @@ export async function runClaudeLogin(
   const terminal = await client.create(threadId);
   const deadline = now() + timeoutMs;
   let closeMode: "force" | "if-clean" = "force";
+  let cancelled = false;
+  let committed = false;
+  let outcomeError: Error | undefined;
+
+  const markCommitted = () => {
+    if (committed) return;
+    committed = true;
+    options.onSuccess?.();
+  };
 
   try {
     let current = terminal;
     while (true) {
-      if (signal?.aborted) {
-        throw new Error("Claude login was cancelled. This BB session was not changed.");
-      }
       if (current.status === "exited") {
         closeMode = "if-clean";
         if (current.exitCode === 0) {
-          options.onSuccess?.();
-          return;
-        }
-        if (current.exitCode === 78) {
-          throw new Error(
+          markCommitted();
+        } else if (current.exitCode === 78) {
+          outcomeError = new Error(
             "Account-changing login requires Google Chrome or Chromium on this session's macOS or Linux machine. This BB session was not changed.",
           );
+        } else {
+          outcomeError = new Error(
+            "Claude login did not finish successfully. This BB session was not changed.",
+          );
         }
-        throw new Error(
-          "Claude login did not finish successfully. This BB session was not changed.",
-        );
+        break;
       }
       if (current.status === "disconnected") {
-        throw new Error(
+        outcomeError = new Error(
           "Claude login was cancelled or its machine disconnected. This BB session was not changed.",
         );
+        break;
+      }
+      if (signal?.aborted) {
+        cancelled = true;
+        outcomeError = new Error(
+          "Claude login was cancelled. This BB session was not changed.",
+        );
+        break;
       }
       if (now() >= deadline) {
-        throw new Error(
+        outcomeError = new Error(
           "Claude login timed out after 10 minutes. This BB session was not changed.",
         );
+        break;
       }
       await waitForNextPoll(sleep, pollMs, signal);
       if (signal?.aborted) {
-        throw new Error("Claude login was cancelled. This BB session was not changed.");
+        cancelled = true;
+        outcomeError = new Error(
+          "Claude login was cancelled. This BB session was not changed.",
+        );
+        break;
       }
       current = await client.get(terminal.id);
     }
-  } finally {
-    try {
-      await client.close(terminal.id, closeMode);
-      await client.onSettled?.(terminal.id);
-    } catch {
-      // Closing an already-exited helper terminal is best-effort cleanup. It
-      // must not turn a successful login into a false failure. A failed close
-      // stays owned so plugin disposal can retry it.
-      await client.onCleanupFailed?.(terminal.id, terminal.hostId);
-    }
+  } catch (error) {
+    outcomeError =
+      error instanceof Error
+        ? error
+        : new Error("Claude login could not be observed safely.");
   }
+
+  let closed: LoginTerminal | undefined;
+  try {
+    closed = await client.close(terminal.id, closeMode);
+    if (cancelled && closed.status === "exited" && closed.exitCode === 0) {
+      markCommitted();
+      outcomeError = undefined;
+    }
+    await client.onSettled?.(terminal.id);
+  } catch {
+    if (cancelled && closed === undefined) {
+      // A failed atomic close cannot prove that the machine-wide login stayed
+      // unchanged. Treat it as potentially committed and never release the
+      // selected runtime on this ambiguous path.
+      markCommitted();
+    }
+    await client.onCleanupFailed?.(terminal.id, terminal.hostId);
+  }
+
+  if (outcomeError) throw outcomeError;
 }
 
 export async function runClaudeAuthStatus(
