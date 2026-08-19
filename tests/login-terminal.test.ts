@@ -19,7 +19,7 @@ function terminal(
   status: LoginTerminal["status"],
   exitCode: number | null = null,
 ): LoginTerminal {
-  return { id: "terminal_1", status, exitCode };
+  return { hostId: "host_1", id: "terminal_1", status, exitCode };
 }
 
 function client(
@@ -35,14 +35,15 @@ function client(
   };
 }
 
-test("the login command leaves account selection to Claude's website", () => {
+test("the login command can prefill the target Claude subscription email", () => {
   const buildCommand = Reflect.get(loginTerminal, "buildClaudeLoginCommand") as unknown;
   assert.equal(typeof buildCommand, "function");
 
-  const command = (buildCommand as () => string)();
-  assert.equal(buildClaudeLoginCommand.length, 0);
+  const command = (buildCommand as (email: string) => string)(
+    "second+claude@example.com",
+  );
   assert.match(command, /auth login --claudeai/);
-  assert.doesNotMatch(command, /--email/);
+  assert.match(command, /--email 'second\+claude@example\.com'/);
   assert.match(command, /mktemp -d/);
   assert.match(command, /BROWSER="\$browser_launcher"/);
   assert.match(command, /google-chrome-stable/);
@@ -316,7 +317,7 @@ test("the auth-status command emits only safe classification fields", () => {
   assert.match(command, /loggedIn/);
   assert.match(command, /authMethod/);
   assert.match(command, /apiProvider/);
-  assert.match(command, /subscriptionType/);
+  assert.doesNotMatch(command, /subscriptionType/);
   assert.doesNotMatch(command, /accountEmail|orgId|orgName/);
 });
 
@@ -355,7 +356,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
       child.once("error", reject);
       child.stdout.on("data", (chunk: Buffer) => {
         output += chunk.toString("utf8");
-        if (output.includes("subscriptionType=max")) {
+        if (output.includes("apiProvider=firstParty\n")) {
           clearTimeout(timeout);
           resolve();
         }
@@ -366,7 +367,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
     assert.equal(child.exitCode, null);
     assert.equal(
       output,
-      "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n",
+      "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n",
     );
     const exitCode = await new Promise<number | null>((resolve, reject) => {
       const timeout = setTimeout(
@@ -436,15 +437,63 @@ test("auth status accepts the CRLF output produced by a BB terminal", () => {
     "loggedIn=true",
     "authMethod=claude.ai",
     "apiProvider=firstParty",
-    "subscriptionType=max",
     "",
   ].join("\r\n");
   assert.deepEqual((parse as (value: string) => unknown)(output), {
     apiProvider: "firstParty",
     authMethod: "claude.ai",
     loggedIn: true,
-    subscriptionType: "max",
   });
+});
+
+test("auth status accepts a first-party Claude login without subscriptionType", () => {
+  const parse = Reflect.get(loginTerminal, "parseClaudeAuthStatus") as (
+    value: string,
+  ) => unknown;
+
+  assert.deepEqual(
+    parse("loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n"),
+    {
+      apiProvider: "firstParty",
+      authMethod: "claude.ai",
+      loggedIn: true,
+    },
+  );
+});
+
+test("the auth-status helper supports Claude accounts without subscriptionType", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-auth-no-plan-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}\'',
+    ].join("\n"),
+  );
+  await chmod(fakeClaude, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      ["-c", loginTerminal.buildClaudeAuthStatusCommand(1_000)],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${fixtureRoot}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        },
+      },
+    );
+
+    assert.equal(result.status, 3, result.stderr);
+    assert.equal(
+      result.stdout,
+      "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n",
+    );
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
 });
 
 test("auth status fails closed on unsafe or incomplete output", () => {
@@ -454,7 +503,7 @@ test("auth status fails closed on unsafe or incomplete output", () => {
 
   for (const output of [
     "loggedIn=true\nauthMethod=apiKey\napiProvider=firstParty\nsubscriptionType=max\n",
-    "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n",
+    "loggedIn=true\nauthMethod=claude.ai\n",
     "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\nemail=private@example.com\n",
   ]) {
     assert.throws(() => parse(output), /subscription login could not be verified/);
@@ -489,7 +538,7 @@ test("auth verification reads safe output before BB discards exited terminal out
             "HTTP 409: Terminal output is unavailable because the session is not running",
           );
         }
-        return "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\nsubscriptionType=max\n";
+        return "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n";
       },
     },
     "thread_1",
@@ -500,7 +549,6 @@ test("auth verification reads safe output before BB discards exited terminal out
     apiProvider: "firstParty",
     authMethod: "claude.ai",
     loggedIn: true,
-    subscriptionType: "max",
   });
   assert.deepEqual(closes, ["force"]);
 });

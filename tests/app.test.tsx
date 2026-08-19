@@ -1,9 +1,25 @@
 // @vitest-environment jsdom
 
 import { fireEvent, waitFor } from "@testing-library/react";
-import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { expect, test } from "vitest";
+import {
+  loadPluginApp,
+  renderSlot,
+  type PluginRpcTestHandlers,
+} from "@get-bb/plugin-sdk/testing/app";
+import { toast } from "sonner";
+import { beforeEach, expect, test, vi } from "vitest";
 import type { rpcContract } from "../contract";
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 const actionProps = {
   isCompactViewport: false,
@@ -19,7 +35,7 @@ const defaultRpc = {
 };
 
 async function renderAction(
-  rpc: typeof defaultRpc | Record<string, unknown> = defaultRpc,
+  rpc: PluginRpcTestHandlers<typeof rpcContract> = defaultRpc,
 ) {
   const app = await loadPluginApp(() => import("../app.tsx"));
   return renderSlot<typeof actionProps, typeof rpcContract>(
@@ -69,7 +85,7 @@ test("using the current login is the default and requires no email", async () =>
   }
 });
 
-test("sign-in opens the isolated browser directly without collecting an email", async () => {
+test("sign-in accepts a blank optional email", async () => {
   const slot = await renderAction();
 
   try {
@@ -81,15 +97,51 @@ test("sign-in opens the isolated browser directly without collecting an email", 
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    expect(slot.queryByRole("textbox", { name: /email/i })).toBeNull();
     expect(
-      slot.queryByRole("button", { name: "Open isolated Claude login" }),
-    ).toBeNull();
+      ((await slot.findByRole("textbox", { name: /email/i })) as HTMLInputElement)
+        .value,
+    ).toBe("");
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open isolated Claude login" }),
+    );
 
     await waitFor(() => {
       expect(slot.inspection.rpcCalls).toContainEqual({
         method: "switchAccount",
         input: { mode: "login", threadId: "thread_1" },
+      });
+    });
+  } finally {
+    slot.lifecycle.unmount();
+  }
+});
+
+test("sign-in can prefill email and waits for explicit browser launch", async () => {
+  const slot = await renderAction();
+
+  try {
+    fireEvent.click(
+      await slot.findByRole("button", {
+        name: "Switch Claude login for this session",
+      }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Sign in to another account" }),
+    );
+    const email = await slot.findByRole("textbox", { name: /email/i });
+    fireEvent.change(email, { target: { value: "second@example.com" } });
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open isolated Claude login" }),
+    );
+
+    await waitFor(() => {
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "switchAccount",
+        input: {
+          email: "second@example.com",
+          mode: "login",
+          threadId: "thread_1",
+        },
       });
     });
   } finally {
@@ -115,6 +167,9 @@ test("the browser handoff explains that Claude's home screen does not end the BB
     );
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open isolated Claude login" }),
     );
 
     expect(
@@ -150,6 +205,9 @@ test("the authorization-code field is disclosed only while login waits", async (
     );
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open isolated Claude login" }),
     );
     expect(slot.queryByRole("textbox", { name: "Authorization code" })).toBeNull();
     fireEvent.click(await slot.findByRole("button", { name: "Claude showed a code?" }));
@@ -191,12 +249,57 @@ test("failed post-login verification keeps the selected session unreleased", asy
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open isolated Claude login" }),
+    );
 
     expect((await slot.findByRole("alert")).textContent).toContain(
       "machine login may have changed",
     );
     expect(slot.queryByRole("dialog")).not.toBeNull();
   } finally {
+    slot.lifecycle.unmount();
+  }
+});
+
+test("a post-commit failure stays visible after the dialog closes", async () => {
+  let rejectSwitch!: (error: Error) => void;
+  let reportCompleting!: () => void;
+  const switchResult = new Promise<never>((_resolve, reject) => {
+    rejectSwitch = reject;
+  });
+  const completing = new Promise<void>((resolve) => {
+    reportCompleting = resolve;
+  });
+  const slot = await renderAction({
+    ...defaultRpc,
+    cancelSwitch: async () => {
+      reportCompleting();
+      return { outcome: "completing" as const };
+    },
+    switchAccount: async () => switchResult,
+  });
+
+  try {
+    fireEvent.click(
+      await slot.findByRole("button", {
+        name: "Switch Claude login for this session",
+      }),
+    );
+    fireEvent.click(await slot.findByRole("button", { name: "Use current login" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Cancel" }));
+    await completing;
+
+    rejectSwitch(new Error("BB could not release this session's runtime."));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        "BB could not release this session's runtime.",
+      );
+    });
+  } finally {
+    rejectSwitch(new Error("test cleanup"));
+    await switchResult.catch(() => undefined);
     slot.lifecycle.unmount();
   }
 });

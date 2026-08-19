@@ -4,6 +4,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
@@ -13,5 +14,5 @@
     "noEmit": true,
     "skipLibCheck": false
   },
-  "include": ["server.ts", "app.tsx", "components", "lib", "hooks"]
+  "include": ["*.ts", "*.tsx", "components", "lib", "hooks", "tests"]
 }

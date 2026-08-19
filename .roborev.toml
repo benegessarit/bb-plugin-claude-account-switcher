@@ -36,7 +36,7 @@ exclude_patterns = [
 ]
 
 review_guidelines = """
-This local BB plugin releases a selected Claude Code runtime after verifying subscription authentication on the exact machine.
-Prioritize incorrect state transitions, active-session interruption, replay of a changed failed request, cancellation races, credential or terminal-output exposure, host-lock leaks, and tests that do not exercise the public plugin contract.
-Do not report style-only findings, speculative architecture, or requests for remote CI in this local-only tiny tool.
+This local BB plugin releases a selected Claude Code runtime after verifying Claude.ai authentication on the exact machine.
+Prioritize incorrect state transitions, active-session interruption, cancellation races, credential or terminal-output exposure, host-lock leaks, unsafe helper cleanup, and tests that do not exercise the public plugin contract.
+Do not report style-only findings, speculative architecture, or requests for remote CI or publication in this local-only tool.
 """

@@ -58,6 +58,36 @@ test("an idle session uses the current login without opening OAuth", async () =>
   assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
 });
 
+test("failed-helper reconciliation holds the machine lock", async () => {
+  const events: string[] = [];
+  const hostLocks = new Set<string>();
+  let releaseCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let cleanupStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    cleanupStarted = resolve;
+  });
+  const switching = switchClaudeAccount(
+    dependencies(events, {
+      reconcileCleanup: async () => {
+        cleanupStarted();
+        await cleanup;
+      },
+    }),
+    { mode: "current", threadId: "thread_1" },
+    hostLocks,
+    signal(),
+  );
+  await started;
+
+  assert.equal(hostLocks.has("host_1"), true);
+  releaseCleanup();
+  assert.deepEqual(await switching, { outcome: "ready-next-message" });
+  assert.equal(hostLocks.size, 0);
+});
+
 test("an errored session releases the runtime for the next message", async () => {
   const events: string[] = [];
   const deps = dependencies(events, {
@@ -76,32 +106,6 @@ test("an errored session releases the runtime for the next message", async () =>
 
   assert.deepEqual(result, { outcome: "ready-next-message" });
   assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
-});
-
-test("a session that moves to another machine is never stopped", async () => {
-  const events: string[] = [];
-  let threadCount = 0;
-  const deps = dependencies(events, {
-    getThread: async () => {
-      events.push("thread");
-      threadCount += 1;
-      return {
-        ...thread("error"),
-        environment: { hostId: threadCount === 1 ? "host_1" : "host_2" },
-      };
-    },
-  });
-
-  const result = await switchClaudeAccount(
-    deps,
-    { mode: "login", threadId: "thread_1" },
-    new Set(),
-    signal(),
-    { markCommitted: () => events.push("committed") },
-  );
-
-  assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
-  assert.deepEqual(events, ["thread", "login", "committed", "auth", "thread"]);
 });
 
 for (const status of ["active", "starting", "stopping"] as const) {

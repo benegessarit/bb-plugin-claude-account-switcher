@@ -16,4 +16,5 @@ This plugin rebinds one loaded BB runtime to a machine-wide Claude subscription 
 
 - Style-only nits that do not hide a defect.
 - Broad rewrites unrelated to the session-rebinding contract.
+- Speculative abstractions without a demonstrated caller, repeated rule, or failure mode.
 - GitHub, CI, marketplace, or publication suggestions for this local-only tool.

@@ -8,7 +8,14 @@ import {
 } from "./login-terminal";
 import { switchClaudeAccount } from "./switch-account";
 
-type SwitchPhase = "cancellable" | "committed";
+type SwitchPhase = "cancellable" | "cancelling" | "committed";
+
+const UNCLEAN_TERMINALS_KEY = "unclean-login-terminals-v1";
+
+interface UncleanTerminalRecord {
+  readonly hostId: string;
+  readonly terminalId: string;
+}
 
 interface ActiveSwitch {
   readonly controller: AbortController;
@@ -25,13 +32,56 @@ function decodeTerminalOutput(
     .join("");
 }
 
-export default function plugin(bb: BbPluginApi) {
+function parseUncleanTerminals(value: unknown): Map<string, string> {
+  if (value === undefined) return new Map();
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error("Stored Claude login cleanup state is invalid.");
+  }
+  const records = new Map<string, string>();
+  for (const candidate of value) {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      !("terminalId" in candidate) ||
+      !("hostId" in candidate) ||
+      typeof candidate.terminalId !== "string" ||
+      !candidate.terminalId ||
+      typeof candidate.hostId !== "string" ||
+      !candidate.hostId
+    ) {
+      throw new Error("Stored Claude login cleanup state is invalid.");
+    }
+    records.set(candidate.terminalId, candidate.hostId);
+  }
+  return records;
+}
+
+export default async function plugin(bb: BbPluginApi) {
   const hostLocks = new Set<string>();
   const activeLoginTerminals = new Map<string, string>();
-  const activeTerminals = new Set<string>();
-  const uncleanTerminals = new Map<string, string>();
+  const uncleanTerminals = parseUncleanTerminals(
+    await bb.storage.kv.get<unknown>(UNCLEAN_TERMINALS_KEY),
+  );
+  const activeTerminals = new Set(uncleanTerminals.keys());
   const activeSwitches = new Map<string, ActiveSwitch>();
   const cleanupReconciliations = new Map<string, Promise<void>>();
+  let cleanupPersistence: Promise<void> = Promise.resolve();
+
+  function persistUncleanTerminals(): Promise<void> {
+    cleanupPersistence = cleanupPersistence
+      .catch(() => undefined)
+      .then(async () => {
+        const records: UncleanTerminalRecord[] = [...uncleanTerminals].map(
+          ([terminalId, hostId]) => ({ hostId, terminalId }),
+        );
+        if (records.length === 0) {
+          await bb.storage.kv.delete(UNCLEAN_TERMINALS_KEY);
+        } else {
+          await bb.storage.kv.set(UNCLEAN_TERMINALS_KEY, records);
+        }
+      });
+    return cleanupPersistence;
+  }
 
   async function closeTerminal(
     terminalId: string,
@@ -40,36 +90,49 @@ export default function plugin(bb: BbPluginApi) {
     await bb.sdk.terminals.close({ terminalId, mode });
   }
 
-  function settleTerminal(terminalId: string): void {
+  async function settleTerminal(terminalId: string): Promise<void> {
     activeTerminals.delete(terminalId);
-    uncleanTerminals.delete(terminalId);
+    const wasUnclean = uncleanTerminals.delete(terminalId);
     for (const [threadId, activeTerminalId] of activeLoginTerminals) {
       if (activeTerminalId === terminalId) activeLoginTerminals.delete(threadId);
     }
+    if (wasUnclean) await persistUncleanTerminals();
+  }
+
+  async function markUncleanTerminal(
+    terminalId: string,
+    hostId: string,
+  ): Promise<void> {
+    uncleanTerminals.set(terminalId, hostId);
+    activeTerminals.add(terminalId);
+    await persistUncleanTerminals();
   }
 
   async function reconcileFailedCleanup(hostId: string): Promise<void> {
-    const terminalIds = [...uncleanTerminals]
-      .filter(([, terminalHostId]) => terminalHostId === hostId)
-      .map(([terminalId]) => terminalId);
-    if (terminalIds.length === 0) return;
     const activeReconciliation = cleanupReconciliations.get(hostId);
     if (activeReconciliation) return activeReconciliation;
 
     const reconciliation = (async () => {
-      let cleanupFailed = false;
-      for (const terminalId of terminalIds) {
-        try {
-          await closeTerminal(terminalId, "force");
-          settleTerminal(terminalId);
-        } catch {
-          cleanupFailed = true;
+      while (true) {
+        const terminalIds = [...uncleanTerminals]
+          .filter(([, terminalHostId]) => terminalHostId === hostId)
+          .map(([terminalId]) => terminalId);
+        if (terminalIds.length === 0) return;
+
+        let cleanupFailed = false;
+        for (const terminalId of terminalIds) {
+          try {
+            await closeTerminal(terminalId, "force");
+            await settleTerminal(terminalId);
+          } catch {
+            cleanupFailed = true;
+          }
         }
-      }
-      if (cleanupFailed) {
-        throw new Error(
-          "A previous Claude login helper could not be stopped. Reconnect its machine, then try again.",
-        );
+        if (cleanupFailed) {
+          throw new Error(
+            "A previous Claude login helper could not be stopped. Reconnect its machine, then try again.",
+          );
+        }
       }
     })();
     cleanupReconciliations.set(hostId, reconciliation);
@@ -89,7 +152,17 @@ export default function plugin(bb: BbPluginApi) {
       if (active.phase === "committed") {
         return { outcome: "completing" as const };
       }
+      if (active.phase === "cancelling") {
+        await active.settled;
+        return {
+          outcome:
+            active.mode === "login"
+              ? ("cancelled-before-login" as const)
+              : ("cancelled-before-release" as const),
+        };
+      }
 
+      active.phase = "cancelling";
       active.controller.abort();
       await active.settled;
       return {
@@ -123,9 +196,12 @@ export default function plugin(bb: BbPluginApi) {
       return { submitted: true as const };
     },
 
-    async switchAccount({ mode, threadId }) {
+    async switchAccount({ email, mode, threadId }) {
       if (activeSwitches.has(threadId)) {
         throw new Error("A Claude account switch is already open for this session.");
+      }
+      if (mode === "current" && email !== undefined) {
+        throw new Error("Email is only used when signing in to another account.");
       }
 
       const controller = new AbortController();
@@ -169,7 +245,7 @@ export default function plugin(bb: BbPluginApi) {
                       scope: { kind: "thread", threadId: targetId },
                       start: {
                         mode: "command",
-                        command: buildClaudeLoginCommand(),
+                        command: buildClaudeLoginCommand(email),
                       },
                       title: "Sign in to Claude",
                     });
@@ -178,8 +254,7 @@ export default function plugin(bb: BbPluginApi) {
                     return terminal;
                   },
                   get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onCleanupFailed: (terminalId) =>
-                    uncleanTerminals.set(terminalId, hostId),
+                  onCleanupFailed: markUncleanTerminal,
                   onSettled: settleTerminal,
                 },
                 targetThreadId,
@@ -191,13 +266,6 @@ export default function plugin(bb: BbPluginApi) {
               await bb.sdk.threads.stop({ threadId: targetThreadId });
             },
             verifySubscription: async (targetThreadId, hostId) => {
-              const usage = await bb.sdk.system.usageLimits({ hostId });
-              if (usage.claudeCode.status !== "ok" || !usage.claudeCode.planLabel) {
-                throw new Error(
-                  "BB could not verify an active Claude subscription on this session's machine.",
-                );
-              }
-
               await runClaudeAuthStatus(
                 {
                   close: closeTerminal,
@@ -216,8 +284,7 @@ export default function plugin(bb: BbPluginApi) {
                     return terminal;
                   },
                   get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onCleanupFailed: (terminalId) =>
-                    uncleanTerminals.set(terminalId, hostId),
+                  onCleanupFailed: markUncleanTerminal,
                   onSettled: settleTerminal,
                   output: async (terminalId) => {
                     const output = await bb.sdk.terminals.output({
@@ -256,12 +323,16 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.onDispose(async () => {
     const switches = [...activeSwitches.values()];
-    for (const active of switches) active.controller.abort();
+    for (const active of switches) {
+      if (active.phase === "cancellable") active.phase = "cancelling";
+      active.controller.abort();
+    }
     await Promise.all(switches.map(({ settled }) => settled));
     await Promise.all(
       [...activeTerminals].map(async (terminalId) => {
         try {
           await closeTerminal(terminalId, "force");
+          await settleTerminal(terminalId);
         } catch {
           // The terminal may already have exited or its host may be offline.
         }
@@ -269,7 +340,6 @@ export default function plugin(bb: BbPluginApi) {
     );
     activeLoginTerminals.clear();
     activeTerminals.clear();
-    uncleanTerminals.clear();
     cleanupReconciliations.clear();
     hostLocks.clear();
     activeSwitches.clear();

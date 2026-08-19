@@ -146,7 +146,8 @@ browser.once("spawn", () => {
 });
 `;
 
-export function buildClaudeLoginCommand(): string {
+export function buildClaudeLoginCommand(email?: string): string {
+  const emailArgument = email?.trim() ? ` --email ${shellQuote(email.trim())}` : "";
   return [
     'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")"',
     'browser_launcher="$browser_dir/open-private-chrome"',
@@ -155,7 +156,7 @@ export function buildClaudeLoginCommand(): string {
     `/usr/bin/printf '%s' ${shellQuote(PRIVATE_BROWSER_SCRIPT)} > "$browser_launcher"`,
     '/bin/chmod 700 "$browser_launcher"',
     '("$browser_launcher" --check || exit 78)',
-    'BROWSER="$browser_launcher" command claude auth login --claudeai >/dev/null 2>&1',
+    `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
   ].join(" && ");
 }
 
@@ -167,7 +168,7 @@ export function buildClaudeAuthStatusCommand(phaseTimeoutMs = 30_000): string {
     'const {spawnSync}=require("node:child_process")',
     `const result=spawnSync("claude",["auth","status","--json"],{encoding:"utf8",killSignal:"SIGKILL",timeout:${phaseTimeoutMs}})`,
     "if(result.status!==0)process.exit(result.status??1)",
-    `try{const status=JSON.parse(result.stdout);const fields=[["loggedIn",String(status.loggedIn)],["authMethod",status.authMethod],["apiProvider",status.apiProvider],["subscriptionType",status.subscriptionType]];if(fields.some(([,value])=>typeof value!=="string"||!/^[A-Za-z0-9._-]+$/.test(value)))process.exit(2);process.stdout.write(fields.map(([key,value])=>key+"="+value).join("\\n")+"\\n");setTimeout(()=>process.exit(3),${phaseTimeoutMs})}catch{process.exit(2)}`,
+    `try{const status=JSON.parse(result.stdout);const fields=[["loggedIn",String(status.loggedIn)],["authMethod",status.authMethod],["apiProvider",status.apiProvider]];if(fields.some(([,value])=>typeof value!=="string"||!/^[A-Za-z0-9._-]+$/.test(value)))process.exit(2);process.stdout.write(fields.map(([key,value])=>key+"="+value).join("\\n")+"\\n");setTimeout(()=>process.exit(3),${phaseTimeoutMs})}catch{process.exit(2)}`,
   ].join(";");
   return `command node -e ${shellQuote(script)} 2>/dev/null`;
 }
@@ -176,7 +177,6 @@ export interface ClaudeAuthStatus {
   readonly loggedIn: true;
   readonly authMethod: "claude.ai";
   readonly apiProvider: "firstParty";
-  readonly subscriptionType: string;
 }
 
 const AUTH_STATUS_ERROR =
@@ -188,7 +188,7 @@ export function parseClaudeAuthStatus(output: string): ClaudeAuthStatus {
     .filter(Boolean)
     .map((line) => line.split("="));
   if (
-    entries.length !== 4 ||
+    entries.length !== 3 ||
     entries.some(
       (entry) =>
         entry.length !== 2 ||
@@ -204,8 +204,7 @@ export function parseClaudeAuthStatus(output: string): ClaudeAuthStatus {
   if (
     fields.loggedIn !== "true" ||
     fields.authMethod !== "claude.ai" ||
-    fields.apiProvider !== "firstParty" ||
-    !fields.subscriptionType
+    fields.apiProvider !== "firstParty"
   ) {
     throw new Error(AUTH_STATUS_ERROR);
   }
@@ -214,7 +213,6 @@ export function parseClaudeAuthStatus(output: string): ClaudeAuthStatus {
     apiProvider: "firstParty",
     authMethod: "claude.ai",
     loggedIn: true,
-    subscriptionType: fields.subscriptionType,
   };
 }
 
@@ -222,6 +220,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_POLL_MS = 500;
 
 export interface LoginTerminal {
+  readonly hostId: string;
   readonly id: string;
   readonly status: "starting" | "running" | "exited" | "disconnected";
   readonly exitCode: number | null;
@@ -231,8 +230,8 @@ export interface LoginTerminalClient {
   close(terminalId: string, mode: "force" | "if-clean"): Promise<void>;
   create(threadId: string): Promise<LoginTerminal>;
   get(terminalId: string): Promise<LoginTerminal>;
-  onCleanupFailed?(terminalId: string): void;
-  onSettled?(terminalId: string): void;
+  onCleanupFailed?(terminalId: string, hostId: string): Promise<void> | void;
+  onSettled?(terminalId: string): Promise<void> | void;
 }
 
 export interface AuthStatusTerminalClient extends LoginTerminalClient {
@@ -329,12 +328,12 @@ export async function runClaudeLogin(
   } finally {
     try {
       await client.close(terminal.id, closeMode);
-      client.onSettled?.(terminal.id);
+      await client.onSettled?.(terminal.id);
     } catch {
       // Closing an already-exited helper terminal is best-effort cleanup. It
       // must not turn a successful login into a false failure. A failed close
       // stays owned so plugin disposal can retry it.
-      client.onCleanupFailed?.(terminal.id);
+      await client.onCleanupFailed?.(terminal.id, terminal.hostId);
     }
   }
 }
@@ -377,11 +376,11 @@ export async function runClaudeAuthStatus(
   } finally {
     try {
       await client.close(terminal.id, "force");
-      client.onSettled?.(terminal.id);
+      await client.onSettled?.(terminal.id);
     } catch {
       // Best-effort cleanup must not hide the auth classification result. A
       // failed close stays owned so plugin disposal can retry it.
-      client.onCleanupFailed?.(terminal.id);
+      await client.onCleanupFailed?.(terminal.id, terminal.hostId);
     }
   }
 }

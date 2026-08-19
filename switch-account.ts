@@ -74,13 +74,13 @@ export async function switchClaudeAccount(
 > {
   throwIfCancelled(signal);
   const initial = await classifySession(dependencies, request.threadId);
-  await dependencies.reconcileCleanup(initial.hostId);
   if (hostLocks.has(initial.hostId)) {
     throw new Error("A Claude account switch is already open on this machine.");
   }
 
   hostLocks.add(initial.hostId);
   try {
+    await dependencies.reconcileCleanup(initial.hostId);
     if (request.mode === "login") {
       await dependencies.login(
         request.threadId,

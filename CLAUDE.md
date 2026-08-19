@@ -1,9 +1,9 @@
-# Claude Session Login for BB
+# Claude Account Switcher for BB
 
 This plugin rebinds one BB Claude Code session to the verified subscription login on its exact machine.
 
-- Keep `Use current login` as the default. It must not open OAuth.
-- Keep browser login optional. Account selection belongs on Claude's website.
+- Keep `Use current login` as the default. It must not open OAuth or require email.
+- Keep browser login optional. Email is only an optional prefill; account selection belongs on Claude's website.
 - Open account-changing login in a unique temporary Chrome or Chromium profile so no existing browser cookie can silently select the old account.
 - Support macOS and Linux session machines. Refuse account-changing login clearly when neither Chrome nor Chromium is available.
 - Never read credentials, Keychain, email identity, organization identity, or raw auth output.

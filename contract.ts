@@ -4,6 +4,7 @@ import { z } from "zod";
 const threadInput = z.object({ threadId: z.string().min(1) }).strict();
 const switchInput = threadInput
   .extend({
+    email: z.string().trim().email().max(254).optional(),
     mode: z.enum(["current", "login"]),
   })
   .strict();
