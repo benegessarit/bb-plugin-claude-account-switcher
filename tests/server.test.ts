@@ -181,6 +181,78 @@ test("a mismatched helper reserves its actual machine until cleanup finishes", a
   }
 });
 
+test("failed mismatch persistence still allows cleanup reconciliation", async () => {
+  let closeAttempts = 0;
+  let creates = 0;
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw new Error("terminal host disconnected");
+          return {
+            exitCode: 1,
+            hostId: "host_2",
+            id: "status_terminal",
+            status: "exited" as const,
+          };
+        },
+        create: async () => {
+          creates += 1;
+          return {
+            exitCode: creates === 1 ? null : 1,
+            hostId: "host_2",
+            id: "status_terminal",
+            status: creates === 1 ? ("running" as const) : ("exited" as const),
+          };
+        },
+      },
+      threads: {
+        get: async ({ threadId }) => ({
+          environment: { hostId: threadId === "thread_1" ? "host_1" : "host_2" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+  const originalSet = host.bb.storage.kv.set.bind(host.bb.storage.kv);
+  let persistenceAttempts = 0;
+  Object.defineProperty(host.bb.storage.kv, "set", {
+    configurable: true,
+    value: async (key: string, value: unknown) => {
+      persistenceAttempts += 1;
+      if (persistenceAttempts === 1) {
+        throw new Error("cleanup state could not be stored");
+      }
+      await originalSet(key, value);
+    },
+  });
+
+  try {
+    await assert.rejects(
+      host.harness.behavior.callRpc("switchAccount", {
+        mode: "current",
+        threadId: "thread_1",
+      }),
+      /cleanup state could not be stored/,
+    );
+    await assert.rejects(
+      host.harness.behavior.callRpc("switchAccount", {
+        mode: "current",
+        threadId: "thread_2",
+      }),
+      /subscription login could not be verified/,
+    );
+    assert.equal(creates, 2);
+    assert.equal(closeAttempts, 3);
+  } finally {
+    await host.harness.lifecycle.dispose();
+  }
+});
+
 test("valid Claude auth can release the runtime when BB usage lookup is unavailable", async () => {
   const host = createFakePluginHost({
     pluginId: "claude-account-switcher",
@@ -519,10 +591,10 @@ test("plugin disposal cancels and closes an active login helper", async () => {
     sdk: {
       terminals: {
         close: async () => ({
-          exitCode: null,
+          exitCode: 1,
           hostId: "host_1",
           id: "login_terminal",
-          status: "disconnected" as const,
+          status: "exited" as const,
         }),
         create: async () => {
           loginStarted();
@@ -704,10 +776,10 @@ test("a later switch reconciles failed login cleanup before it can start", async
           closeAttempts += 1;
           if (closeAttempts === 1) throw new Error("session machine disconnected");
           return {
-            exitCode: null,
+            exitCode: 1,
             hostId: "host_1",
             id: `login_terminal_${createCount}`,
-            status: "disconnected" as const,
+            status: "exited" as const,
           };
         },
         create: async () => {
@@ -863,10 +935,10 @@ test("cancellation stops accepting authorization codes before terminal cleanup f
           closeStarted();
           await closeReleased;
           return {
-            exitCode: null,
+            exitCode: 1,
             hostId: "host_1",
             id: "login_terminal",
-            status: "disconnected" as const,
+            status: "exited" as const,
           };
         },
         create: async () => {
@@ -1059,10 +1131,10 @@ test("manual code submission and cancellation reach the active login", async () 
         close: async () => {
           terminalStatus = "disconnected";
           return {
-            exitCode: null,
+            exitCode: 1,
             hostId: "host_1",
             id: "terminal_1",
-            status: terminalStatus,
+            status: "exited" as const,
           };
         },
         create: async () => {

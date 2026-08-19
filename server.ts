@@ -7,7 +7,7 @@ import {
   runClaudeLogin,
   type LoginTerminal,
 } from "./login-terminal";
-import { switchClaudeAccount } from "./switch-account";
+import { HostReservations, switchClaudeAccount } from "./switch-account";
 
 type SwitchPhase = "cancellable" | "cancelling" | "committed";
 
@@ -70,7 +70,7 @@ function parseUncleanTerminals(value: unknown): Map<string, string> {
 }
 
 export default async function plugin(bb: BbPluginApi) {
-  const hostLocks = new Set<string>();
+  const hostLocks = new HostReservations();
   const activeLoginTerminals = new Map<string, string>();
   const uncleanTerminals = parseUncleanTerminals(
     await bb.storage.kv.get<unknown>(UNCLEAN_TERMINALS_KEY),
@@ -126,21 +126,15 @@ export default async function plugin(bb: BbPluginApi) {
     expectedHostId: string,
   ): Promise<void> {
     if (terminal.hostId === expectedHostId) return;
-    const reservedActualHost = !hostLocks.has(terminal.hostId);
-    if (reservedActualHost) hostLocks.add(terminal.hostId);
+    hostLocks.add(terminal.hostId);
     activeTerminals.add(terminal.id);
-    let cleanupSecured = false;
     try {
       await closeTerminal(terminal.id, "force");
       await settleTerminal(terminal.id);
-      cleanupSecured = true;
     } catch {
       await markUncleanTerminal(terminal.id, terminal.hostId);
-      cleanupSecured = true;
     } finally {
-      if (reservedActualHost && cleanupSecured) {
-        hostLocks.delete(terminal.hostId);
-      }
+      hostLocks.delete(terminal.hostId);
     }
     throw new Error("BB opened the Claude helper on a different machine.");
   }

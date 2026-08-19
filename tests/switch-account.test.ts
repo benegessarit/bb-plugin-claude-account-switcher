@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  HostReservations,
   switchClaudeAccount,
   type AccountSwitchDependencies,
   type ThreadSnapshot,
 } from "../switch-account.ts";
+
+test("host reservations remain locked until every owner releases", () => {
+  const reservations = new HostReservations();
+
+  reservations.add("host_1");
+  reservations.add("host_1");
+  assert.equal(reservations.has("host_1"), true);
+
+  reservations.delete("host_1");
+  assert.equal(reservations.has("host_1"), true);
+
+  reservations.delete("host_1");
+  assert.equal(reservations.has("host_1"), false);
+});
 
 function thread(
   status: NonNullable<ThreadSnapshot["status"]> = "idle",

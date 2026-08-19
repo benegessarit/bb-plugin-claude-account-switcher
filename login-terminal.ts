@@ -290,8 +290,8 @@ export async function runClaudeLogin(
   const terminal = await client.create(threadId);
   const deadline = now() + timeoutMs;
   let closeMode: "force" | "if-clean" = "force";
-  let cancelled = false;
   let committed = false;
+  let completionKnown = false;
   let outcomeError: Error | undefined;
 
   const markCommitted = () => {
@@ -304,6 +304,7 @@ export async function runClaudeLogin(
     let current = terminal;
     while (true) {
       if (current.status === "exited") {
+        completionKnown = true;
         closeMode = "if-clean";
         if (current.exitCode === 0) {
           markCommitted();
@@ -325,7 +326,6 @@ export async function runClaudeLogin(
         break;
       }
       if (signal?.aborted) {
-        cancelled = true;
         outcomeError = new Error(
           "Claude login was cancelled. This BB session was not changed.",
         );
@@ -339,7 +339,6 @@ export async function runClaudeLogin(
       }
       await waitForNextPoll(sleep, pollMs, signal);
       if (signal?.aborted) {
-        cancelled = true;
         outcomeError = new Error(
           "Claude login was cancelled. This BB session was not changed.",
         );
@@ -357,13 +356,19 @@ export async function runClaudeLogin(
   let closed: LoginTerminal | undefined;
   try {
     closed = await client.close(terminal.id, closeMode);
-    if (cancelled && closed.status === "exited" && closed.exitCode === 0) {
-      markCommitted();
-      outcomeError = undefined;
+    if (closed.status === "exited") {
+      completionKnown = true;
+      if (closed.exitCode === 0) {
+        markCommitted();
+        outcomeError = undefined;
+      }
+      await client.onSettled?.(terminal.id);
+    } else {
+      if (!completionKnown) markCommitted();
+      await client.onCleanupFailed?.(terminal.id, terminal.hostId);
     }
-    await client.onSettled?.(terminal.id);
   } catch {
-    if (cancelled && closed === undefined) {
+    if (!completionKnown && closed === undefined) {
       // A failed atomic close cannot prove that the machine-wide login stayed
       // unchanged. Treat it as potentially committed and never release the
       // selected runtime on this ambiguous path.

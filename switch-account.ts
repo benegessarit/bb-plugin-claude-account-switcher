@@ -1,5 +1,36 @@
 const CLAUDE_PROVIDER_ID = "claude-code";
 
+export interface HostLockRegistry {
+  add(hostId: string): unknown;
+  delete(hostId: string): unknown;
+  has(hostId: string): boolean;
+}
+
+export class HostReservations implements HostLockRegistry {
+  readonly #counts = new Map<string, number>();
+
+  add(hostId: string): this {
+    this.#counts.set(hostId, (this.#counts.get(hostId) ?? 0) + 1);
+    return this;
+  }
+
+  clear(): void {
+    this.#counts.clear();
+  }
+
+  delete(hostId: string): boolean {
+    const count = this.#counts.get(hostId);
+    if (count === undefined) return false;
+    if (count === 1) this.#counts.delete(hostId);
+    else this.#counts.set(hostId, count - 1);
+    return true;
+  }
+
+  has(hostId: string): boolean {
+    return this.#counts.has(hostId);
+  }
+}
+
 export interface ThreadSnapshot {
   readonly providerId: string;
   readonly status?: "active" | "starting" | "idle" | "stopping" | "error";
@@ -66,7 +97,7 @@ function throwIfCancelled(signal: AbortSignal): void {
 export async function switchClaudeAccount(
   dependencies: AccountSwitchDependencies,
   request: AccountSwitchRequest,
-  hostLocks: Set<string>,
+  hostLocks: HostLockRegistry,
   signal: AbortSignal,
   lifecycle: AccountSwitchLifecycle = { markCommitted: () => undefined },
 ): Promise<

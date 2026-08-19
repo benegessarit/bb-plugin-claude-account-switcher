@@ -29,7 +29,7 @@ function client(
   return {
     close: async (_id, mode) => {
       closes.push(mode);
-      return terminal("disconnected");
+      return terminal("exited", 1);
     },
     create: async () => states[0]!,
     get: async () => states.shift() ?? terminal("exited", 0),
@@ -527,7 +527,7 @@ test("auth verification reads safe output before BB discards exited terminal out
     {
       close: async (_id, mode) => {
         closes.push(mode);
-        return terminal("disconnected");
+        return terminal("exited", 1);
       },
       create: async () => terminal("running"),
       get: async () => {
@@ -679,6 +679,38 @@ test("cancellation treats an atomically closed successful login as committed", a
   await login;
   assert.equal(committed, true);
   assert.equal(closeMode, "force");
+});
+
+test("cancellation overlapping a failed poll and close is potentially committed", async () => {
+  const controller = new AbortController();
+  let cleanupFailed = false;
+  let committed = false;
+  const terminalClient: LoginTerminalClient = {
+    close: async () => {
+      throw new Error("terminal close unavailable");
+    },
+    create: async () => terminal("running"),
+    get: async () => {
+      controller.abort();
+      throw new Error("terminal state unavailable");
+    },
+    onCleanupFailed: () => {
+      cleanupFailed = true;
+    },
+  };
+
+  await assert.rejects(
+    runClaudeLogin(terminalClient, "thread_1", {
+      onSuccess: () => {
+        committed = true;
+      },
+      signal: controller.signal,
+      sleep: async () => undefined,
+    }),
+    /terminal state unavailable/,
+  );
+  assert.equal(committed, true);
+  assert.equal(cleanupFailed, true);
 });
 
 test("an already-cancelled login creates no helper terminal", async () => {
