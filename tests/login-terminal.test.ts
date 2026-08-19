@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
@@ -44,14 +44,135 @@ test("the login command selects the target Claude subscription email", () => {
   );
   assert.match(command, /auth login --claudeai/);
   assert.match(command, /--email 'second\+claude@example\.com'/);
+  assert.match(command, /mktemp -d/);
+  assert.match(command, /BROWSER="\$browser_launcher"/);
+  assert.match(command, /Google Chrome/);
+  assert.match(command, /--incognito/);
   assert.match(command, />\/dev\/null 2>&1/);
 });
 
-test("the login command omits the email flag when no prefill is requested", () => {
-  assert.equal(
-    buildClaudeLoginCommand(),
-    "command claude auth login --claudeai >/dev/null 2>&1",
+test("the login command omits the email flag but still isolates browser cookies", () => {
+  const command = buildClaudeLoginCommand();
+
+  assert.doesNotMatch(command, /--email/);
+  assert.match(command, /BROWSER="\$browser_launcher"/);
+  assert.match(command, /--incognito/);
+});
+
+test("the private-browser helper is removed without recursive deletion", () => {
+  const command = buildClaudeLoginCommand();
+
+  assert.match(command, /\/bin\/unlink "\$browser_launcher"/);
+  assert.match(command, /\/bin\/rmdir "\$browser_dir"/);
+  assert.doesNotMatch(command, /rm -rf/);
+});
+
+test("the login command gives Claude a working ephemeral private-browser helper", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-private-browser-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const capturedHelper = join(fixtureRoot, "captured-helper");
+  const capturedPath = join(fixtureRoot, "captured-path");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      '/bin/cp "$BROWSER" "$BB_SWITCH_CAPTURE_HELPER"',
+      '/usr/bin/printf \'%s\\n\' "$BROWSER" > "$BB_SWITCH_CAPTURE_PATH"',
+    ].join("\n"),
   );
+  await chmod(fakeClaude, 0o755);
+
+  try {
+    const result = spawnSync("/bin/sh", ["-c", buildClaudeLoginCommand()], {
+      env: {
+        ...process.env,
+        BB_SWITCH_CAPTURE_HELPER: capturedHelper,
+        BB_SWITCH_CAPTURE_PATH: capturedPath,
+        PATH: `${fixtureRoot}:/usr/bin:/bin`,
+        TMPDIR: fixtureRoot,
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(
+      await readFile(capturedHelper, "utf8"),
+      /open -na 'Google Chrome' --args --incognito "\$1"/,
+    );
+    const ephemeralPath = (await readFile(capturedPath, "utf8")).trim();
+    assert.match(ephemeralPath, /^.+\/bb-claude-login\.[^/]+\/open-private-chrome$/);
+    await assert.rejects(access(ephemeralPath));
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("a BB terminal hangup exits promptly and removes the private-browser helper", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-hangup-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const capturedPath = join(fixtureRoot, "captured-path");
+  const capturedPid = join(fixtureRoot, "captured-pid");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      '/usr/bin/printf \'%s\\n\' "$BROWSER" > "$BB_SWITCH_CAPTURE_PATH"',
+      '/usr/bin/printf \'%s\\n\' "$$" > "$BB_SWITCH_CAPTURE_PID"',
+      "while :; do /bin/sleep 1; done",
+    ].join("\n"),
+  );
+  await chmod(fakeClaude, 0o755);
+
+  const child = spawn("/bin/zsh", ["-c", buildClaudeLoginCommand()], {
+    env: {
+      ...process.env,
+      BB_SWITCH_CAPTURE_PATH: capturedPath,
+      BB_SWITCH_CAPTURE_PID: capturedPid,
+      PATH: `${fixtureRoot}:/usr/bin:/bin`,
+      TMPDIR: fixtureRoot,
+      ZDOTDIR: fixtureRoot,
+    },
+    stdio: "ignore",
+  });
+
+  let fakeClaudePid: number | undefined;
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        await access(capturedPid);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    const ephemeralPath = (await readFile(capturedPath, "utf8")).trim();
+    fakeClaudePid = Number((await readFile(capturedPid, "utf8")).trim());
+    assert.ok(Number.isSafeInteger(fakeClaudePid));
+
+    const exited = new Promise<"exited">((resolve) => {
+      child.once("exit", () => resolve("exited"));
+    });
+    child.kill("SIGHUP");
+    const outcome = await Promise.race([
+      exited,
+      new Promise<"still-running">((resolve) => {
+        setTimeout(() => resolve("still-running"), 500);
+      }),
+    ]);
+
+    assert.equal(outcome, "exited");
+    await assert.rejects(access(ephemeralPath));
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (fakeClaudePid !== undefined) {
+      try {
+        process.kill(fakeClaudePid, "SIGKILL");
+      } catch {
+        // The fake may already have exited with its parent shell.
+      }
+    }
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
 });
 
 test("the auth-status command emits only safe classification fields", () => {

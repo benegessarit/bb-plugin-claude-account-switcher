@@ -69,7 +69,7 @@ test("using the current login is the default and requires no email", async () =>
   }
 });
 
-test("sign-in is optional and accepts a blank email prefill", async () => {
+test("sign-in is optional, uses a private browser, and accepts a blank email prefill", async () => {
   const slot = await renderAction();
 
   try {
@@ -84,7 +84,10 @@ test("sign-in is optional and accepts a blank email prefill", async () => {
     expect(
       await slot.findByRole("textbox", { name: "Email to prefill (optional)" }),
     ).toHaveProperty("value", "");
-    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+    expect(await slot.findByText(/private Chrome window/i)).not.toBeNull();
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open private Claude login" }),
+    );
 
     await waitFor(() => {
       expect(slot.inspection.rpcCalls).toContainEqual({
@@ -116,7 +119,9 @@ test("the browser handoff explains that Claude's home screen does not end the BB
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open private Claude login" }),
+    );
 
     expect(
       await slot.findByText(/Claude may leave you on its home screen/i),
@@ -145,7 +150,9 @@ test("an invalid optional email stays in the dialog with one inline error", asyn
       await slot.findByRole("textbox", { name: "Email to prefill (optional)" }),
       { target: { value: "not-an-email" } },
     );
-    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open private Claude login" }),
+    );
 
     expect((await slot.findByRole("alert")).textContent).toContain(
       "valid email address or leave the prefill blank",
@@ -182,7 +189,9 @@ test("the authorization-code field is disclosed only while login waits", async (
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
     expect(slot.queryByRole("textbox", { name: "Authorization code" })).toBeNull();
-    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open private Claude login" }),
+    );
     fireEvent.click(await slot.findByRole("button", { name: "Claude showed a code?" }));
     const code = await slot.findByRole("textbox", { name: "Authorization code" });
     fireEvent.change(code, { target: { value: "test-authorization-code" } });
@@ -222,7 +231,9 @@ test("failed post-login verification keeps the selected session unreleased", asy
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    fireEvent.click(await slot.findByRole("button", { name: "Open Claude login" }));
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Open private Claude login" }),
+    );
 
     expect((await slot.findByRole("alert")).textContent).toContain(
       "machine login may have changed",

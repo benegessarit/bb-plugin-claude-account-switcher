@@ -4,7 +4,21 @@ function shellQuote(value: string): string {
 
 export function buildClaudeLoginCommand(email?: string): string {
   const emailArgument = email?.trim() ? ` --email ${shellQuote(email.trim())}` : "";
-  return `command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`;
+  const privateBrowserScript = [
+    "#!/bin/sh",
+    `exec /usr/bin/open -na 'Google Chrome' --args --incognito "$1"`,
+  ]
+    .map(shellQuote)
+    .join(" ");
+  return [
+    'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")"',
+    'browser_launcher="$browser_dir/open-private-chrome"',
+    'cleanup_browser_launcher() { /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }',
+    "trap cleanup_browser_launcher EXIT",
+    `/usr/bin/printf '%s\\n' ${privateBrowserScript} > "$browser_launcher"`,
+    '/bin/chmod 700 "$browser_launcher"',
+    `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
+  ].join(" && ");
 }
 
 export function buildClaudeAuthStatusCommand(phaseTimeoutMs = 30_000): string {

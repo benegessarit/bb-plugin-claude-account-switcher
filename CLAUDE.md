@@ -4,6 +4,7 @@ This plugin rebinds one BB Claude Code session to the verified subscription logi
 
 - Keep `Use current login` as the default. It must not open OAuth or require email.
 - Keep browser login optional. Email is only an optional prefill.
+- Open account-changing login in a private Chrome window so regular browser cookies cannot silently select the old account.
 - Never read credentials, Keychain, email identity, organization identity, or raw auth output.
 - Refuse active, starting, and stopping sessions before login or release.
 - Preserve exact failed-request matching and the per-machine lock.
