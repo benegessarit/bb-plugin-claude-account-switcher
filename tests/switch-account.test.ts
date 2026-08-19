@@ -88,6 +88,37 @@ test("failed-helper reconciliation holds the machine lock", async () => {
   assert.equal(hostLocks.size, 0);
 });
 
+test("cancellation during cleanup reconciliation launches no helper", async () => {
+  const events: string[] = [];
+  const controller = new AbortController();
+  let releaseCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let cleanupStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    cleanupStarted = resolve;
+  });
+  const switching = switchClaudeAccount(
+    dependencies(events, {
+      reconcileCleanup: async () => {
+        events.push("cleanup");
+        cleanupStarted();
+        await cleanup;
+      },
+    }),
+    { mode: "login", threadId: "thread_1" },
+    new Set(),
+    controller.signal,
+  );
+  await started;
+  controller.abort();
+  releaseCleanup();
+
+  await assert.rejects(switching, /cancelled/);
+  assert.deepEqual(events, ["thread", "cleanup"]);
+});
+
 test("an errored session releases the runtime for the next message", async () => {
   const events: string[] = [];
   const deps = dependencies(events, {
@@ -150,6 +181,28 @@ test("a completed login with failed auth proof does not release the session", as
 
   assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
   assert.deepEqual(events, ["thread", "login", "committed", "auth"]);
+});
+
+test("a cleanup error after login success reports changed login without release", async () => {
+  const events: string[] = [];
+  const deps = dependencies(events, {
+    login: async (_threadId, _hostId, _signal, onSuccess) => {
+      events.push("login");
+      onSuccess?.();
+      throw new Error("cleanup state could not be stored");
+    },
+  });
+
+  const result = await switchClaudeAccount(
+    deps,
+    { mode: "login", threadId: "thread_1" },
+    new Set(),
+    signal(),
+    { markCommitted: () => events.push("committed") },
+  );
+
+  assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
+  assert.deepEqual(events, ["thread", "login", "committed"]);
 });
 
 test("cancellation before the current-login commit leaves the runtime untouched", async () => {

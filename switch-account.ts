@@ -74,6 +74,7 @@ export async function switchClaudeAccount(
 > {
   throwIfCancelled(signal);
   const initial = await classifySession(dependencies, request.threadId);
+  throwIfCancelled(signal);
   if (hostLocks.has(initial.hostId)) {
     throw new Error("A Claude account switch is already open on this machine.");
   }
@@ -81,13 +82,18 @@ export async function switchClaudeAccount(
   hostLocks.add(initial.hostId);
   try {
     await dependencies.reconcileCleanup(initial.hostId);
+    throwIfCancelled(signal);
     if (request.mode === "login") {
-      await dependencies.login(
-        request.threadId,
-        initial.hostId,
-        signal,
-        lifecycle.markCommitted,
-      );
+      let loginCommitted = false;
+      try {
+        await dependencies.login(request.threadId, initial.hostId, signal, () => {
+          loginCommitted = true;
+          lifecycle.markCommitted();
+        });
+      } catch (error) {
+        if (loginCommitted) return { outcome: "login-changed-not-rebound" };
+        throw error;
+      }
     }
 
     try {

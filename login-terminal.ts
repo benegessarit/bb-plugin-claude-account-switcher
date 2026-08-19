@@ -284,6 +284,9 @@ export async function runClaudeLogin(
   const signal = options.signal;
   const sleep = options.sleep ?? defaultSleep;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (signal?.aborted) {
+    throw new Error("Claude login was cancelled. This BB session was not changed.");
+  }
   const terminal = await client.create(threadId);
   const deadline = now() + timeoutMs;
   let closeMode: "force" | "if-clean" = "force";
@@ -348,6 +351,7 @@ export async function runClaudeAuthStatus(
   const signal = options.signal;
   const sleep = options.sleep ?? defaultSleep;
   const timeoutMs = options.timeoutMs ?? 15_000;
+  if (signal?.aborted) throw new Error(AUTH_STATUS_ERROR);
   const terminal = await client.create(threadId);
   const deadline = now() + timeoutMs;
 

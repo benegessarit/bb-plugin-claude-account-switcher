@@ -614,19 +614,62 @@ test("a cancelled login stops before another poll and is force-closed", async ()
   const controller = new AbortController();
   const states = [terminal("running"), terminal("exited", 0)];
   let sleeps = 0;
-  controller.abort();
 
   await assert.rejects(
     runClaudeLogin(client(states, closes), "thread_1", {
       signal: controller.signal,
       sleep: async () => {
         sleeps += 1;
+        controller.abort();
       },
     }),
     /cancelled/,
   );
-  assert.equal(sleeps, 0);
+  assert.equal(sleeps, 1);
   assert.deepEqual(closes, ["force"]);
+});
+
+test("an already-cancelled login creates no helper terminal", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let creates = 0;
+  const terminalClient: LoginTerminalClient = {
+    close: async () => undefined,
+    create: async () => {
+      creates += 1;
+      return terminal("running");
+    },
+    get: async () => terminal("running"),
+  };
+
+  await assert.rejects(
+    runClaudeLogin(terminalClient, "thread_1", { signal: controller.signal }),
+    /cancelled/,
+  );
+  assert.equal(creates, 0);
+});
+
+test("already-cancelled auth verification creates no helper terminal", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let creates = 0;
+  const terminalClient: AuthStatusTerminalClient = {
+    close: async () => undefined,
+    create: async () => {
+      creates += 1;
+      return terminal("running");
+    },
+    get: async () => terminal("running"),
+    output: async () => "",
+  };
+
+  await assert.rejects(
+    runClaudeAuthStatus(terminalClient, "thread_1", {
+      signal: controller.signal,
+    }),
+    /subscription login could not be verified/,
+  );
+  assert.equal(creates, 0);
 });
 
 test("cancellation wakes a pending poll without waiting for its timer", async () => {

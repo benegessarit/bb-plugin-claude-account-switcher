@@ -108,6 +108,21 @@ export default async function plugin(bb: BbPluginApi) {
     await persistUncleanTerminals();
   }
 
+  async function verifyTerminalHost(
+    terminal: { readonly hostId: string; readonly id: string },
+    expectedHostId: string,
+  ): Promise<void> {
+    if (terminal.hostId === expectedHostId) return;
+    activeTerminals.add(terminal.id);
+    try {
+      await closeTerminal(terminal.id, "force");
+      await settleTerminal(terminal.id);
+    } catch {
+      await markUncleanTerminal(terminal.id, terminal.hostId);
+    }
+    throw new Error("BB opened the Claude helper on a different machine.");
+  }
+
   async function reconcileFailedCleanup(hostId: string): Promise<void> {
     const activeReconciliation = cleanupReconciliations.get(hostId);
     if (activeReconciliation) return activeReconciliation;
@@ -242,13 +257,14 @@ export default async function plugin(bb: BbPluginApi) {
                     const terminal = await bb.sdk.terminals.create({
                       cols: 80,
                       rows: 24,
-                      scope: { kind: "thread", threadId: targetId },
+                      scope: { cwd: null, hostId, kind: "host_path" },
                       start: {
                         mode: "command",
                         command: buildClaudeLoginCommand(email),
                       },
                       title: "Sign in to Claude",
                     });
+                    await verifyTerminalHost(terminal, hostId);
                     activeTerminals.add(terminal.id);
                     activeLoginTerminals.set(targetId, terminal.id);
                     return terminal;
@@ -273,13 +289,14 @@ export default async function plugin(bb: BbPluginApi) {
                     const terminal = await bb.sdk.terminals.create({
                       cols: 80,
                       rows: 8,
-                      scope: { kind: "thread", threadId: targetId },
+                      scope: { cwd: null, hostId, kind: "host_path" },
                       start: {
                         mode: "command",
                         command: buildClaudeAuthStatusCommand(),
                       },
                       title: "Verify Claude login",
                     });
+                    await verifyTerminalHost(terminal, hostId);
                     activeTerminals.add(terminal.id);
                     return terminal;
                   },
@@ -338,6 +355,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }),
     );
+    await persistUncleanTerminals();
     activeLoginTerminals.clear();
     activeTerminals.clear();
     cleanupReconciliations.clear();

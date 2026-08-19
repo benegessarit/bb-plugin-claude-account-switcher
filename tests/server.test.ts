@@ -16,6 +16,7 @@ test("the current-login RPC verifies the exact host and releases an idle runtime
         }),
         create: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "status_terminal",
           status: "running" as const,
         }),
@@ -51,8 +52,57 @@ test("the current-login RPC verifies the exact host and releases an idle runtime
     });
 
     assert.deepEqual(result, { outcome: "ready-next-message" });
+    const createRequest = host.harness.inspection.sdk.callsTo(
+      "terminals.create",
+    )[0]![0] as { readonly scope: unknown };
+    assert.deepEqual(createRequest.scope, {
+      cwd: null,
+      hostId: "host_1",
+      kind: "host_path",
+    });
     assert.equal(host.harness.inspection.sdk.callsTo("system.usageLimits").length, 0);
     assert.equal(host.harness.inspection.sdk.callsTo("threads.stop").length, 1);
+  } finally {
+    await host.harness.lifecycle.dispose();
+  }
+});
+
+test("a helper opened on another machine is closed before the runtime can be released", async () => {
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => undefined,
+        create: async () => ({
+          exitCode: null,
+          hostId: "host_2",
+          id: "status_terminal",
+          status: "running" as const,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+
+  try {
+    await assert.rejects(
+      host.harness.behavior.callRpc("switchAccount", {
+        mode: "current",
+        threadId: "thread_1",
+      }),
+      /different machine/,
+    );
+    assert.equal(host.harness.inspection.sdk.callsTo("threads.stop").length, 0);
+    assert.deepEqual(host.harness.inspection.sdk.callsTo("terminals.close"), [
+      [{ mode: "force", terminalId: "status_terminal" }],
+    ]);
   } finally {
     await host.harness.lifecycle.dispose();
   }
@@ -71,6 +121,7 @@ test("valid Claude auth can release the runtime when BB usage lookup is unavaila
         close: async () => undefined,
         create: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "status_terminal",
           status: "running" as const,
         }),
@@ -122,6 +173,7 @@ test("two sessions on one machine can rebind sequentially", async () => {
         close: async () => undefined,
         create: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "status_terminal",
           status: "running" as const,
         }),
@@ -180,12 +232,14 @@ test("current-login cancellation settles before releasing the runtime", async ()
           authStarted();
           return {
             exitCode: null,
+            hostId: "host_1",
             id: "status_terminal",
             status: "running" as const,
           };
         },
         get: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "status_terminal",
           status: "running" as const,
         }),
@@ -240,11 +294,13 @@ test("cancellation after login success reports that safe completion is in progre
           return terminalCreates === 1
             ? {
                 exitCode: 0,
+                hostId: "host_1",
                 id: "login_terminal",
                 status: "exited" as const,
               }
             : {
                 exitCode: null,
+                hostId: "host_1",
                 id: "status_terminal",
                 status: "running" as const,
               };
@@ -409,6 +465,58 @@ test("plugin disposal retries terminal cleanup that failed during cancellation",
     [{ mode: "force", terminalId: "login_terminal" }],
     [{ mode: "force", terminalId: "login_terminal" }],
   ]);
+});
+
+test("plugin disposal retries cleanup persistence after a completed login", async () => {
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async () => {
+          throw new Error("session machine disconnected");
+        },
+        create: async () => ({
+          exitCode: 0,
+          hostId: "host_1",
+          id: "login_terminal",
+          status: "exited" as const,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+      },
+    },
+  });
+  await plugin(host.bb);
+  const originalSet = host.bb.storage.kv.set.bind(host.bb.storage.kv);
+  let persistenceAttempts = 0;
+  Object.defineProperty(host.bb.storage.kv, "set", {
+    configurable: true,
+    value: async (key: string, value: unknown) => {
+      persistenceAttempts += 1;
+      if (persistenceAttempts === 1) {
+        throw new Error("cleanup state could not be stored");
+      }
+      await originalSet(key, value);
+    },
+  });
+
+  const result = await host.harness.behavior.callRpc("switchAccount", {
+    mode: "login",
+    threadId: "thread_1",
+  });
+
+  assert.deepEqual(result, { outcome: "login-changed-not-rebound" });
+  assert.equal(host.harness.inspection.sdk.callsTo("threads.stop").length, 0);
+  assert.equal(persistenceAttempts, 1);
+
+  await host.harness.lifecycle.dispose();
+
+  assert.equal(persistenceAttempts, 2);
 });
 
 test("a later switch reconciles failed login cleanup before it can start", async () => {
@@ -733,8 +841,7 @@ test("failed cleanup follows the helper terminal's actual machine", async () => 
     threadId: "thread_1",
   });
   await started;
-  await host.harness.behavior.callRpc("cancelSwitch", { threadId: "thread_1" });
-  await assert.rejects(firstSwitch, /cancelled/);
+  await assert.rejects(firstSwitch, /different machine/);
 
   await assert.rejects(
     host.harness.behavior.callRpc("switchAccount", {
@@ -764,17 +871,20 @@ test("manual code submission and cancellation reach the active login", async () 
           loginStarted();
           return {
             exitCode: null,
+            hostId: "host_1",
             id: "terminal_1",
             status: terminalStatus,
           };
         },
         get: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "terminal_1",
           status: terminalStatus,
         }),
         input: async () => ({
           exitCode: null,
+          hostId: "host_1",
           id: "terminal_1",
           status: terminalStatus,
         }),
