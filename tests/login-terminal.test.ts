@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import * as loginTerminal from "../login-terminal.ts";
 import {
+  buildChromeIncognitoLauncher,
   buildClaudeLoginCommand,
   runClaudeAuthStatus,
   runClaudeLogin,
@@ -36,7 +37,7 @@ function client(
   };
 }
 
-test("the login command delegates browser handling to Claude Code", () => {
+test("the login command routes authorization through Chrome Incognito", () => {
   const command = buildClaudeLoginCommand("/opt/trusted claude/bin/claude");
 
   assert.match(command, /^\/bin\/sh -c /);
@@ -48,7 +49,72 @@ test("the login command delegates browser handling to Claude Code", () => {
   assert.match(command, /auth login --claudeai/);
   assert.match(command, /\/opt\/trusted claude\/bin\/claude/);
   assert.doesNotMatch(command, /command claude auth login/);
-  assert.doesNotMatch(command, /BROWSER=|--email|--user-data-dir|--incognito/);
+  assert.match(command, /BROWSER=/);
+  assert.match(command, /--incognito/);
+  assert.match(command, /--new-window/);
+  assert.match(command, /\/bin\/unlink/);
+  assert.match(command, /\/bin\/rmdir/);
+  assert.doesNotMatch(command, /--email|--user-data-dir|open -n|open -na/);
+});
+
+test("the Incognito launcher invokes one browser executable without a profile override", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-"));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    const result = spawnSync(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
+      encoding: "utf8",
+      env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      "https://claude.com/cai/oauth/authorize",
+    ]);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the Incognito launcher rejects non-HTTPS browser targets", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-url-"));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    const result = spawnSync(launcherPath, ["file:///etc/passwd"], {
+      encoding: "utf8",
+      env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
+    });
+
+    assert.equal(result.status, 78, result.stderr);
+    await assert.rejects(access(browserArgs));
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
 });
 
 test("the auth-status command emits only safe classification fields", () => {

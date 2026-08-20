@@ -3,7 +3,7 @@
 This plugin rebinds one BB Claude Code session to the verified subscription login on its exact machine.
 
 - Keep `Use current login` as the default. It must not open OAuth or require email.
-- Let `claude auth login --claudeai` own the normal-browser flow. Do not create browser profiles, inject `BROWSER`, launch Chrome directly, or collect an email address.
+- Let `claude auth login --claudeai` own authorization, but route its browser URL through one short-lived `BROWSER` launcher that opens Chrome with `--incognito --new-window`. Never use `open -n`, create a temporary browser profile, or collect an email address.
 - Keep account selection and credentials on Claude's website.
 - Resolve Claude Code from BB's host provider status and use that exact executable for login and verification. Never trust the terminal's `PATH` to select Claude.
 - Accept a one-time authorization code only after the login terminal proves echo is disabled. Bound it to one printable line, forward it once, and never store or log it.

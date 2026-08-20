@@ -125,7 +125,7 @@ test("sign-in starts on Claude's website without an email field", async () => {
   }
 });
 
-test("the browser handoff explains that Claude's home screen does not end the BB flow", async () => {
+test("the browser handoff explains why BB opens Chrome Incognito", async () => {
   let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
   const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
     finishSwitch = resolve;
@@ -144,10 +144,10 @@ test("the browser handoff explains that Claude's home screen does not end the BB
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    expect(
-      await slot.findByText(/Claude may leave you on its home screen/i),
-    ).not.toBeNull();
+    expect(await slot.findByText(/one Chrome Incognito window/i)).not.toBeNull();
+    expect(await slot.findByText(/may still offer saved passwords/i)).not.toBeNull();
     expect(await slot.findByText(/Leave this dialog open/i)).not.toBeNull();
+    expect(slot.queryByText(/home screen/i)).toBeNull();
   } finally {
     finishSwitch({ outcome: "ready-next-message" });
     await switchResult;

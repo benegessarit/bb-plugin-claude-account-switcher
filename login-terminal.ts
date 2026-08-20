@@ -11,13 +11,56 @@ function requireAbsoluteClaudePath(claudeExecutablePath: string): string {
   return claudeExecutablePath;
 }
 
+export function buildChromeIncognitoLauncher(browserExecutablePath?: string): string {
+  if (
+    browserExecutablePath !== undefined &&
+    (!browserExecutablePath.startsWith("/") || browserExecutablePath.includes("\0"))
+  ) {
+    throw new Error("BB could not resolve the Chrome executable.");
+  }
+
+  const launch = (browser: string) =>
+    `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`;
+  const lines = [
+    "#!/bin/sh",
+    'url="${1-}"',
+    'case "$url" in https://*) ;; *) exit 78 ;; esac',
+  ];
+  if (browserExecutablePath) lines.push(launch(browserExecutablePath));
+  lines.push(
+    'if test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
+    `  ${launch("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")}`,
+    "fi",
+    'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
+    '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
+    "fi",
+    "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
+    '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
+    '  if test -n "$browser_path"; then',
+    '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
+    "  fi",
+    "done",
+    "exit 78",
+  );
+  return `${lines.join("\n")}\n`;
+}
+
 export function buildClaudeLoginCommand(claudeExecutablePath: string): string {
   const executable = requireAbsoluteClaudePath(claudeExecutablePath);
+  const browserLauncher = buildChromeIncognitoLauncher();
   const script = [
+    'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
+    'browser_launcher="$browser_dir/open-chrome-incognito"',
+    'cleanup_login() { /bin/stty echo >/dev/null 2>&1 || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }',
+    "trap cleanup_login EXIT",
+    "trap 'exit 129' HUP",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+    `/usr/bin/printf '%s' ${shellQuote(browserLauncher)} > "$browser_launcher" || exit 78`,
+    '/bin/chmod 700 "$browser_launcher" || exit 78',
     "/bin/stty -echo >/dev/null 2>&1 || exit 79",
-    "trap '/bin/stty echo >/dev/null 2>&1 || true' EXIT",
     `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
-    `${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
+    `BROWSER="$browser_launcher" ${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
   ].join("; ");
   return `/bin/sh -c ${shellQuote(script)}`;
 }

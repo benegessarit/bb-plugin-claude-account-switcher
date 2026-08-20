@@ -243,16 +243,17 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
           {switchingMode === "login" && (
             <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
               <p className="text-sm text-muted-foreground">
-                Claude Code opens its normal browser login. Choose or change the account
-                on Claude&apos;s website.
+                BB opens one Chrome Incognito window so Claude does not reuse the
+                account signed in to your normal window.
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Icon name="Loading" className="animate-spin" aria-hidden="true" />
                 <span>Finish signing in on Claude&apos;s website.</span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Claude may leave you on its home screen. Leave this dialog open; BB will
-                finish when Claude Code confirms the login.
+                Choose the account there. Chrome may still offer saved passwords from
+                that profile. Leave this dialog open; BB finishes only after Claude Code
+                confirms the login.
               </p>
               {!codeExpanded ? (
                 <Button
