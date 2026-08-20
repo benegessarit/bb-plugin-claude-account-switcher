@@ -10,6 +10,9 @@ import {
 import { HostReservations, switchClaudeAccount } from "./switch-account";
 
 type SwitchPhase = "cancellable" | "cancelling" | "committed";
+type SwitchResult =
+  | { readonly outcome: "ready-next-message" }
+  | { readonly outcome: "login-changed-not-rebound" };
 
 const UNCLEAN_TERMINALS_KEY = "unclean-login-terminals-v1";
 
@@ -20,7 +23,9 @@ interface UncleanTerminalRecord {
 
 interface ActiveSwitch {
   readonly controller: AbortController;
+  readonly id: string;
   readonly mode: "current" | "login";
+  readonly result: Promise<SwitchResult>;
   readonly settled: Promise<void>;
   phase: SwitchPhase;
 }
@@ -71,11 +76,11 @@ function parseUncleanTerminals(value: unknown): Map<string, string> {
 
 export default async function plugin(bb: BbPluginApi) {
   const hostLocks = new HostReservations();
-  const activeLoginTerminals = new Map<string, string>();
   const uncleanTerminals = parseUncleanTerminals(
     await bb.storage.kv.get<unknown>(UNCLEAN_TERMINALS_KEY),
   );
   const activeTerminals = new Set(uncleanTerminals.keys());
+  const activeLoginTerminals = new Map<string, string>();
   const activeSwitches = new Map<string, ActiveSwitch>();
   const cleanupReconciliations = new Map<string, Promise<void>>();
   let cleanupPersistence: Promise<void> = Promise.resolve();
@@ -105,10 +110,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function settleTerminal(terminalId: string): Promise<void> {
     activeTerminals.delete(terminalId);
-    const wasUnclean = uncleanTerminals.delete(terminalId);
-    for (const [threadId, activeTerminalId] of activeLoginTerminals) {
-      if (activeTerminalId === terminalId) activeLoginTerminals.delete(threadId);
+    for (const [threadId, loginTerminalId] of activeLoginTerminals) {
+      if (loginTerminalId === terminalId) activeLoginTerminals.delete(threadId);
     }
+    const wasUnclean = uncleanTerminals.delete(terminalId);
     if (wasUnclean) await persistUncleanTerminals();
   }
 
@@ -139,12 +144,23 @@ export default async function plugin(bb: BbPluginApi) {
     throw new Error("BB opened the Claude helper on a different machine.");
   }
 
-  async function reconcileFailedCleanup(hostId: string): Promise<void> {
+  async function reconcileFailedCleanup(
+    hostId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) {
+      throw new Error("Claude login was cancelled. This BB session was not changed.");
+    }
     const activeReconciliation = cleanupReconciliations.get(hostId);
     if (activeReconciliation) return activeReconciliation;
 
     const reconciliation = (async () => {
       while (true) {
+        if (signal.aborted) {
+          throw new Error(
+            "Claude login was cancelled. This BB session was not changed.",
+          );
+        }
         const terminalIds = [...uncleanTerminals]
           .filter(([, terminalHostId]) => terminalHostId === hostId)
           .map(([terminalId]) => terminalId);
@@ -176,10 +192,36 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function resolveClaudeExecutable(
+    hostId: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const status = await bb.sdk.hosts.providerCliStatus({ hostId, signal });
+    const executablePath = status.claudeCode.executablePath;
+    if (
+      !status.claudeCode.installed ||
+      !executablePath ||
+      !executablePath.startsWith("/")
+    ) {
+      throw new Error("BB could not resolve Claude Code on this session's machine.");
+    }
+    return executablePath;
+  }
+
   bb.rpc.register(rpcContract, {
-    async cancelSwitch({ threadId }) {
+    async attachSwitch({ operationId, threadId }) {
       const active = activeSwitches.get(threadId);
-      if (!active) return { outcome: "not-running" as const };
+      if (!active || active.id !== operationId) {
+        return { outcome: "not-running" as const };
+      }
+      return active.result;
+    },
+
+    async cancelSwitch({ operationId, threadId }) {
+      const active = activeSwitches.get(threadId);
+      if (!active || active.id !== operationId) {
+        return { outcome: "not-running" as const };
+      }
       if (active.phase === "committed") {
         return { outcome: "completing" as const };
       }
@@ -199,148 +241,213 @@ export default async function plugin(bb: BbPluginApi) {
       return { isClaude: thread.providerId === "claude-code" };
     },
 
-    async submitLoginCode({ code, threadId }) {
+    async inspectSwitch({ threadId }) {
+      const active = activeSwitches.get(threadId);
+      if (!active) return { status: "none" as const };
+      return {
+        codeReady: activeLoginTerminals.has(threadId),
+        mode: active.mode,
+        operationId: active.id,
+        phase: active.phase,
+        status: "running" as const,
+      };
+    },
+
+    async submitLoginCode({ code, operationId, threadId }) {
       const active = activeSwitches.get(threadId);
       const terminalId = activeLoginTerminals.get(threadId);
       if (
-        !terminalId ||
         !active ||
+        active.id !== operationId ||
         active.mode !== "login" ||
-        active.phase !== "cancellable"
+        active.phase !== "cancellable" ||
+        !terminalId
       ) {
-        throw new Error("No Claude login is waiting for an authorization code.");
+        throw new Error("Claude login is not waiting for an authorization code.");
       }
+      activeLoginTerminals.delete(threadId);
       await bb.sdk.terminals.input({
-        terminalId,
         dataBase64: Buffer.from(`${code}\n`, "utf8").toString("base64"),
+        terminalId,
       });
       return { submitted: true as const };
     },
 
-    async switchAccount({ email, mode, threadId }) {
-      if (activeSwitches.has(threadId)) {
-        throw new Error("A Claude account switch is already open for this session.");
-      }
-      if (mode === "current" && email !== undefined) {
-        throw new Error("Email is only used when signing in to another account.");
+    async switchAccount({ mode, operationId, threadId }) {
+      const existing = activeSwitches.get(threadId);
+      if (existing) {
+        if (existing.id !== operationId || existing.mode !== mode) {
+          throw new Error("A different Claude account switch is already open.");
+        }
+        return existing.result;
       }
 
       const controller = new AbortController();
-      let markSettled!: () => void;
-      const settled = new Promise<void>((resolve) => {
-        markSettled = resolve;
+      let resolveResult!: (result: SwitchResult) => void;
+      let rejectResult!: (error: unknown) => void;
+      const result = new Promise<SwitchResult>((resolve, reject) => {
+        resolveResult = resolve;
+        rejectResult = reject;
       });
+      const settled = result.then(
+        () => undefined,
+        () => undefined,
+      );
       const active: ActiveSwitch = {
         controller,
+        id: operationId,
         mode,
         phase: "cancellable",
+        result,
         settled,
       };
       activeSwitches.set(threadId, active);
-
-      try {
-        return await switchClaudeAccount(
-          {
-            getThread: async (targetThreadId) => {
-              const target = await bb.sdk.threads.get({
-                include: "environment",
-                threadId: targetThreadId,
-              });
-              return {
-                environment:
-                  "environment" in target && target.environment
-                    ? { hostId: target.environment.hostId }
-                    : null,
-                providerId: target.providerId,
-                status: target.status,
-              };
-            },
-            login: async (targetThreadId, hostId, signal, onSuccess) => {
-              await runClaudeLogin(
-                {
-                  close: closeTerminal,
-                  create: async (targetId) => {
-                    const terminal = await bb.sdk.terminals.create({
-                      cols: 80,
-                      rows: 24,
-                      scope: { cwd: null, hostId, kind: "host_path" },
-                      start: {
-                        mode: "command",
-                        command: buildClaudeLoginCommand(email),
-                      },
-                      title: "Sign in to Claude",
-                    });
-                    await verifyTerminalHost(terminal, hostId);
-                    activeTerminals.add(terminal.id);
-                    activeLoginTerminals.set(targetId, terminal.id);
-                    return terminal;
-                  },
-                  get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onCleanupFailed: markUncleanTerminal,
-                  onSettled: settleTerminal,
-                },
-                targetThreadId,
-                { onSuccess, signal },
-              );
-            },
-            reconcileCleanup: reconcileFailedCleanup,
-            stopThread: async (targetThreadId) => {
-              await bb.sdk.threads.stop({ threadId: targetThreadId });
-            },
-            verifySubscription: async (targetThreadId, hostId) => {
-              await runClaudeAuthStatus(
-                {
-                  close: closeTerminal,
-                  create: async (targetId) => {
-                    const terminal = await bb.sdk.terminals.create({
-                      cols: 80,
-                      rows: 8,
-                      scope: { cwd: null, hostId, kind: "host_path" },
-                      start: {
-                        mode: "command",
-                        command: buildClaudeAuthStatusCommand(),
-                      },
-                      title: "Verify Claude login",
-                    });
-                    await verifyTerminalHost(terminal, hostId);
-                    activeTerminals.add(terminal.id);
-                    return terminal;
-                  },
-                  get: (terminalId) => bb.sdk.terminals.get({ terminalId }),
-                  onCleanupFailed: markUncleanTerminal,
-                  onSettled: settleTerminal,
-                  output: async (terminalId) => {
-                    const output = await bb.sdk.terminals.output({
-                      limitChunks: 8,
-                      tailBytes: 4_096,
-                      terminalId,
-                    });
-                    if (output.truncated) {
-                      throw new Error("Claude auth status output was incomplete.");
-                    }
-                    return decodeTerminalOutput(output.chunks);
-                  },
-                },
-                targetThreadId,
-                { signal: controller.signal, timeoutMs: 15_000 },
-              );
-            },
-          },
-          { mode, threadId },
-          hostLocks,
-          controller.signal,
-          {
-            markCommitted: () => {
-              active.phase = "committed";
-            },
-          },
-        );
-      } finally {
-        if (activeSwitches.get(threadId) === active) {
-          activeSwitches.delete(threadId);
+      let executableHostId: string | undefined;
+      let executablePath: Promise<string> | undefined;
+      const getClaudeExecutable = (hostId: string, signal: AbortSignal) => {
+        if (executableHostId !== undefined && executableHostId !== hostId) {
+          throw new Error("This session changed before BB could run Claude Code.");
         }
-        markSettled();
-      }
+        executableHostId = hostId;
+        executablePath ??= resolveClaudeExecutable(hostId, signal);
+        return executablePath;
+      };
+
+      void (async () => {
+        try {
+          resolveResult(
+            await switchClaudeAccount(
+              {
+                getThread: async (targetThreadId, signal) => {
+                  const target = await bb.sdk.threads.get({
+                    include: "environment",
+                    signal,
+                    threadId: targetThreadId,
+                  });
+                  return {
+                    environment:
+                      "environment" in target && target.environment
+                        ? { hostId: target.environment.hostId }
+                        : null,
+                    providerId: target.providerId,
+                    status: target.status,
+                  };
+                },
+                login: async (targetThreadId, hostId, signal, onSuccess) => {
+                  const claudeExecutable = await getClaudeExecutable(hostId, signal);
+                  await runClaudeLogin(
+                    {
+                      close: closeTerminal,
+                      create: async (targetId) => {
+                        const terminal = await bb.sdk.terminals.create({
+                          cols: 80,
+                          rows: 24,
+                          scope: { cwd: null, hostId, kind: "host_path" },
+                          start: {
+                            mode: "command",
+                            command: buildClaudeLoginCommand(claudeExecutable),
+                          },
+                          title: "Sign in to Claude",
+                        });
+                        await verifyTerminalHost(terminal, hostId);
+                        activeTerminals.add(terminal.id);
+                        return terminal;
+                      },
+                      get: (terminalId, signal) =>
+                        bb.sdk.terminals.get({ signal, terminalId }),
+                      onCleanupFailed: markUncleanTerminal,
+                      onSettled: settleTerminal,
+                      output: async (terminalId, signal) => {
+                        const output = await bb.sdk.terminals.output({
+                          limitChunks: 8,
+                          signal,
+                          tailBytes: 4_096,
+                          terminalId,
+                        });
+                        if (output.truncated) {
+                          throw new Error(
+                            "Claude login readiness output was incomplete.",
+                          );
+                        }
+                        return decodeTerminalOutput(output.chunks);
+                      },
+                    },
+                    targetThreadId,
+                    {
+                      onInputReady: (terminalId) => {
+                        activeLoginTerminals.set(targetThreadId, terminalId);
+                      },
+                      onSuccess,
+                      signal,
+                    },
+                  );
+                },
+                reconcileCleanup: reconcileFailedCleanup,
+                stopThread: async (targetThreadId) => {
+                  await bb.sdk.threads.stop({ threadId: targetThreadId });
+                },
+                verifySubscription: async (targetThreadId, hostId, signal) => {
+                  const claudeExecutable = await getClaudeExecutable(hostId, signal);
+                  await runClaudeAuthStatus(
+                    {
+                      close: closeTerminal,
+                      create: async (targetId) => {
+                        const terminal = await bb.sdk.terminals.create({
+                          cols: 80,
+                          rows: 8,
+                          scope: { cwd: null, hostId, kind: "host_path" },
+                          start: {
+                            mode: "command",
+                            command: buildClaudeAuthStatusCommand(claudeExecutable),
+                          },
+                          title: "Verify Claude login",
+                        });
+                        await verifyTerminalHost(terminal, hostId);
+                        activeTerminals.add(terminal.id);
+                        return terminal;
+                      },
+                      get: (terminalId, signal) =>
+                        bb.sdk.terminals.get({ signal, terminalId }),
+                      onCleanupFailed: markUncleanTerminal,
+                      onSettled: settleTerminal,
+                      output: async (terminalId, signal) => {
+                        const output = await bb.sdk.terminals.output({
+                          limitChunks: 8,
+                          signal,
+                          tailBytes: 4_096,
+                          terminalId,
+                        });
+                        if (output.truncated) {
+                          throw new Error("Claude auth status output was incomplete.");
+                        }
+                        return decodeTerminalOutput(output.chunks);
+                      },
+                    },
+                    targetThreadId,
+                    { signal, timeoutMs: 15_000 },
+                  );
+                },
+              },
+              { mode, threadId },
+              hostLocks,
+              controller.signal,
+              {
+                markCommitted: () => {
+                  active.phase = "committed";
+                },
+              },
+            ),
+          );
+        } catch (error) {
+          rejectResult(error);
+        } finally {
+          if (activeSwitches.get(threadId) === active) {
+            activeSwitches.delete(threadId);
+          }
+        }
+      })();
+
+      return result;
     },
   });
 
@@ -362,8 +469,8 @@ export default async function plugin(bb: BbPluginApi) {
       }),
     );
     await persistUncleanTerminals();
-    activeLoginTerminals.clear();
     activeTerminals.clear();
+    activeLoginTerminals.clear();
     cleanupReconciliations.clear();
     hostLocks.clear();
     activeSwitches.clear();

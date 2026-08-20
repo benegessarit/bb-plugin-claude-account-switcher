@@ -18,8 +18,13 @@ vi.mock("sonner", () => ({
 }));
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
+  vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(
+    "a5a3434e-3728-4951-8c3f-a17ca2f5f234",
+  );
 });
+
+const OPERATION_ID = "a5a3434e-3728-4951-8c3f-a17ca2f5f234";
 
 const actionProps = {
   isCompactViewport: false,
@@ -28,7 +33,9 @@ const actionProps = {
 };
 
 const defaultRpc = {
+  attachSwitch: async () => ({ outcome: "not-running" as const }),
   cancelSwitch: async () => ({ outcome: "not-running" as const }),
+  inspectSwitch: async () => ({ status: "none" as const }),
   inspectThread: async () => ({ isClaude: true }),
   submitLoginCode: async () => ({ submitted: true as const }),
   switchAccount: async () => ({ outcome: "ready-next-message" as const }),
@@ -77,7 +84,11 @@ test("using the current login is the default and requires no email", async () =>
     await waitFor(() => {
       expect(slot.inspection.rpcCalls).toContainEqual({
         method: "switchAccount",
-        input: { mode: "current", threadId: "thread_1" },
+        input: {
+          mode: "current",
+          operationId: OPERATION_ID,
+          threadId: "thread_1",
+        },
       });
     });
   } finally {
@@ -85,7 +96,7 @@ test("using the current login is the default and requires no email", async () =>
   }
 });
 
-test("sign-in accepts a blank optional email", async () => {
+test("sign-in starts on Claude's website without an email field", async () => {
   const slot = await renderAction();
 
   try {
@@ -97,49 +108,14 @@ test("sign-in accepts a blank optional email", async () => {
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    expect(
-      ((await slot.findByRole("textbox", { name: /email/i })) as HTMLInputElement)
-        .value,
-    ).toBe("");
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Open isolated Claude login" }),
-    );
-
-    await waitFor(() => {
-      expect(slot.inspection.rpcCalls).toContainEqual({
-        method: "switchAccount",
-        input: { mode: "login", threadId: "thread_1" },
-      });
-    });
-  } finally {
-    slot.lifecycle.unmount();
-  }
-});
-
-test("sign-in can prefill email and waits for explicit browser launch", async () => {
-  const slot = await renderAction();
-
-  try {
-    fireEvent.click(
-      await slot.findByRole("button", {
-        name: "Switch Claude login for this session",
-      }),
-    );
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Sign in to another account" }),
-    );
-    const email = await slot.findByRole("textbox", { name: /email/i });
-    fireEvent.change(email, { target: { value: "second@example.com" } });
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Open isolated Claude login" }),
-    );
+    expect(slot.queryByRole("textbox", { name: /email/i })).toBeNull();
 
     await waitFor(() => {
       expect(slot.inspection.rpcCalls).toContainEqual({
         method: "switchAccount",
         input: {
-          email: "second@example.com",
           mode: "login",
+          operationId: OPERATION_ID,
           threadId: "thread_1",
         },
       });
@@ -168,10 +144,6 @@ test("the browser handoff explains that Claude's home screen does not end the BB
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Open isolated Claude login" }),
-    );
-
     expect(
       await slot.findByText(/Claude may leave you on its home screen/i),
     ).not.toBeNull();
@@ -183,7 +155,45 @@ test("the browser handoff explains that Claude's home screen does not end the BB
   }
 });
 
-test("the authorization-code field is disclosed only while login waits", async () => {
+test("a remounted action reattaches to the active server-side switch", async () => {
+  let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
+  const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    inspectSwitch: async () => ({
+      codeReady: true,
+      mode: "login" as const,
+      operationId: OPERATION_ID,
+      phase: "cancellable" as const,
+      status: "running" as const,
+    }),
+  });
+
+  try {
+    expect(await slot.findByRole("dialog")).not.toBeNull();
+    expect(
+      await slot.findByText("Finish signing in on Claude's website."),
+    ).not.toBeNull();
+    await waitFor(() => {
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "attachSwitch",
+        input: {
+          operationId: OPERATION_ID,
+          threadId: "thread_1",
+        },
+      });
+    });
+  } finally {
+    finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
+test("the authorization-code fallback is disclosed only while login waits", async () => {
   let rejectSwitch!: (error: Error) => void;
   const switchResult = new Promise<never>((_resolve, reject) => {
     rejectSwitch = reject;
@@ -206,25 +216,29 @@ test("the authorization-code field is disclosed only while login waits", async (
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Open isolated Claude login" }),
-    );
     expect(slot.queryByRole("textbox", { name: "Authorization code" })).toBeNull();
     fireEvent.click(await slot.findByRole("button", { name: "Claude showed a code?" }));
-    const code = await slot.findByRole("textbox", { name: "Authorization code" });
+    const code = await slot.findByLabelText("Authorization code");
     fireEvent.change(code, { target: { value: "test-authorization-code" } });
     fireEvent.click(
       await slot.findByRole("button", { name: "Submit authorization code" }),
     );
-
     await waitFor(() => {
       expect(slot.inspection.rpcCalls).toContainEqual({
         method: "submitLoginCode",
-        input: { code: "test-authorization-code", threadId: "thread_1" },
+        input: {
+          code: "test-authorization-code",
+          operationId: OPERATION_ID,
+          threadId: "thread_1",
+        },
       });
     });
     fireEvent.click(await slot.findByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
+    expect(slot.inspection.rpcCalls).toContainEqual({
+      method: "cancelSwitch",
+      input: { operationId: OPERATION_ID, threadId: "thread_1" },
+    });
   } finally {
     rejectSwitch(new Error("test cleanup"));
     await switchResult.catch(() => undefined);
@@ -249,10 +263,6 @@ test("failed post-login verification keeps the selected session unreleased", asy
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Open isolated Claude login" }),
-    );
-
     expect((await slot.findByRole("alert")).textContent).toContain(
       "machine login may have changed",
     );

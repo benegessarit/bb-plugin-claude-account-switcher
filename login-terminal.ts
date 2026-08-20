@@ -2,171 +2,37 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
 
-const PRIVATE_BROWSER_SCRIPT = `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
-const { accessSync, chmodSync, constants, mkdtempSync, rmSync } = require("node:fs");
-const { delimiter, dirname, isAbsolute, join, resolve } = require("node:path");
-const { homedir, tmpdir } = require("node:os");
+export const LOGIN_INPUT_READY_MARKER = "BB_CLAUDE_LOGIN_INPUT_READY";
 
-function executablePath(command) {
-  const candidates =
-    isAbsolute(command) || command.includes("/")
-      ? [resolve(command)]
-      : (process.env.PATH || "")
-          .split(delimiter)
-          .filter(Boolean)
-          .map((directory) => join(directory, command));
-  return candidates.find((candidate) => {
-    try {
-      accessSync(candidate, constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function findBrowser() {
-  const override = process.env.BB_CLAUDE_LOGIN_BROWSER;
-  if (override) return executablePath(override);
-
-  const candidates =
-    process.platform === "darwin"
-      ? [
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-          join(homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-          "/Applications/Chromium.app/Contents/MacOS/Chromium",
-          join(homedir(), "Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]
-      : process.platform === "linux"
-        ? ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]
-        : [];
-  return candidates.map(executablePath).find(Boolean);
-}
-
-function removeOwnedProfile(profileRoot) {
-  const base = resolve(tmpdir());
-  const target = resolve(profileRoot);
-  if (dirname(target) !== base || !target.startsWith(join(base, "bb-claude-browser-"))) {
-    return;
+function requireAbsoluteClaudePath(claudeExecutablePath: string): string {
+  if (!claudeExecutablePath.startsWith("/") || claudeExecutablePath.includes("\0")) {
+    throw new Error("BB could not resolve the installed Claude Code executable.");
   }
-  try {
-    rmSync(target, { force: true, maxRetries: 3, recursive: true, retryDelay: 100 });
-  } catch {}
+  return claudeExecutablePath;
 }
 
-function watchAndRemoveProfile(profileRoot, browserPid) {
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const path = require("node:path");
-  const base = path.resolve(os.tmpdir());
-  const target = path.resolve(profileRoot);
-  if (
-    path.dirname(target) !== base ||
-    !path.basename(target).startsWith("bb-claude-browser-") ||
-    !Number.isSafeInteger(browserPid) ||
-    browserPid <= 0
-  ) {
-    process.exit(78);
-  }
-
-  const browserIsRunning = () => {
-    try {
-      process.kill(browserPid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  let lastActiveAt = Date.now();
-  const cleanupTimer = setInterval(() => {
-    if (browserIsRunning() || fs.existsSync(path.join(target, "SingletonLock"))) {
-      lastActiveAt = Date.now();
-      return;
-    }
-    if (Date.now() - lastActiveAt < 750) return;
-    try {
-      fs.rmSync(target, {
-        force: true,
-        maxRetries: 3,
-        recursive: true,
-        retryDelay: 100,
-      });
-      clearInterval(cleanupTimer);
-      process.exit(0);
-    } catch {
-      // Keep ownership and retry until this exact temporary profile is gone.
-    }
-  }, 100);
+export function buildClaudeLoginCommand(claudeExecutablePath: string): string {
+  const executable = requireAbsoluteClaudePath(claudeExecutablePath);
+  const script = [
+    "/bin/stty -echo >/dev/null 2>&1 || exit 79",
+    "trap '/bin/stty echo >/dev/null 2>&1 || true' EXIT",
+    `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
+    `${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
+  ].join("; ");
+  return `/bin/sh -c ${shellQuote(script)}`;
 }
 
-const browserPath = findBrowser();
-if (!browserPath) process.exit(78);
-if (process.argv[2] === "--check") process.exit(0);
-const targetUrl = process.argv[2];
-if (!targetUrl) process.exit(78);
-
-const profileRoot = mkdtempSync(join(tmpdir(), "bb-claude-browser-"));
-chmodSync(profileRoot, 0o700);
-const browser = spawn(
-  browserPath,
-  [
-    "--user-data-dir=" + profileRoot,
-    "--incognito",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--new-window",
-    targetUrl,
-  ],
-  { detached: true, stdio: "ignore" },
-);
-
-const fail = () => {
-  removeOwnedProfile(profileRoot);
-  process.exit(78);
-};
-browser.once("error", fail);
-browser.once("spawn", () => {
-  const watcherSource =
-    "(" + watchAndRemoveProfile.toString() + ")(process.argv[1],Number(process.argv[2]))";
-  const watcher = spawn(
-    process.execPath,
-    ["-e", watcherSource, profileRoot, String(browser.pid)],
-    { detached: true, stdio: "ignore" },
-  );
-  watcher.once("error", () => {
-    browser.kill();
-    fail();
-  });
-  watcher.once("spawn", () => {
-    watcher.unref();
-    browser.unref();
-    process.exit(0);
-  });
-});
-`;
-
-export function buildClaudeLoginCommand(email?: string): string {
-  const emailArgument = email?.trim() ? ` --email ${shellQuote(email.trim())}` : "";
-  return [
-    'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")"',
-    'browser_launcher="$browser_dir/open-private-chrome"',
-    'cleanup_browser_launcher() { /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }',
-    "trap cleanup_browser_launcher EXIT",
-    `/usr/bin/printf '%s' ${shellQuote(PRIVATE_BROWSER_SCRIPT)} > "$browser_launcher"`,
-    '/bin/chmod 700 "$browser_launcher"',
-    '("$browser_launcher" --check || exit 78)',
-    `BROWSER="$browser_launcher" command claude auth login --claudeai${emailArgument} >/dev/null 2>&1`,
-  ].join(" && ");
-}
-
-export function buildClaudeAuthStatusCommand(phaseTimeoutMs = 30_000): string {
+export function buildClaudeAuthStatusCommand(
+  claudeExecutablePath: string,
+  phaseTimeoutMs = 30_000,
+): string {
+  const executable = requireAbsoluteClaudePath(claudeExecutablePath);
   if (!Number.isSafeInteger(phaseTimeoutMs) || phaseTimeoutMs <= 0) {
     throw new Error("Claude auth-status helper timeout must be a positive integer.");
   }
   const script = [
     'const {spawnSync}=require("node:child_process")',
-    `const result=spawnSync("claude",["auth","status","--json"],{encoding:"utf8",killSignal:"SIGKILL",timeout:${phaseTimeoutMs}})`,
+    `const result=spawnSync(${JSON.stringify(executable)},["auth","status","--json"],{encoding:"utf8",killSignal:"SIGKILL",timeout:${phaseTimeoutMs}})`,
     "if(result.status!==0)process.exit(result.status??1)",
     `try{const status=JSON.parse(result.stdout);const fields=[["loggedIn",String(status.loggedIn)],["authMethod",status.authMethod],["apiProvider",status.apiProvider]];if(fields.some(([,value])=>typeof value!=="string"||!/^[A-Za-z0-9._-]+$/.test(value)))process.exit(2);process.stdout.write(fields.map(([key,value])=>key+"="+value).join("\\n")+"\\n");setTimeout(()=>process.exit(3),${phaseTimeoutMs})}catch{process.exit(2)}`,
   ].join(";");
@@ -229,17 +95,19 @@ export interface LoginTerminal {
 export interface LoginTerminalClient {
   close(terminalId: string, mode: "force" | "if-clean"): Promise<LoginTerminal>;
   create(threadId: string): Promise<LoginTerminal>;
-  get(terminalId: string): Promise<LoginTerminal>;
+  get(terminalId: string, signal?: AbortSignal): Promise<LoginTerminal>;
   onCleanupFailed?(terminalId: string, hostId: string): Promise<void> | void;
   onSettled?(terminalId: string): Promise<void> | void;
+  output?(terminalId: string, signal?: AbortSignal): Promise<string>;
 }
 
 export interface AuthStatusTerminalClient extends LoginTerminalClient {
-  output(terminalId: string): Promise<string>;
+  output(terminalId: string, signal?: AbortSignal): Promise<string>;
 }
 
 export interface LoginWaitOptions {
   readonly now?: () => number;
+  readonly onInputReady?: (terminalId: string) => void;
   readonly onSuccess?: () => void;
   readonly pollMs?: number;
   readonly signal?: AbortSignal;
@@ -292,6 +160,7 @@ export async function runClaudeLogin(
   let closeMode: "force" | "if-clean" = "force";
   let committed = false;
   let completionKnown = false;
+  let inputReady = false;
   let outcomeError: Error | undefined;
 
   const markCommitted = () => {
@@ -303,15 +172,23 @@ export async function runClaudeLogin(
   try {
     let current = terminal;
     while (true) {
+      if (!inputReady && current.status === "running" && client.output) {
+        try {
+          const output = await client.output(terminal.id, signal);
+          if (output.includes(LOGIN_INPUT_READY_MARKER)) {
+            inputReady = true;
+            options.onInputReady?.(terminal.id);
+          }
+        } catch {
+          // BB may briefly reject output while the command starts. The marker
+          // is the only output the login helper permits, so retrying is safe.
+        }
+      }
       if (current.status === "exited") {
         completionKnown = true;
         closeMode = "if-clean";
         if (current.exitCode === 0) {
           markCommitted();
-        } else if (current.exitCode === 78) {
-          outcomeError = new Error(
-            "Account-changing login requires Google Chrome or Chromium on this session's macOS or Linux machine. This BB session was not changed.",
-          );
         } else {
           outcomeError = new Error(
             "Claude login did not finish successfully. This BB session was not changed.",
@@ -344,7 +221,7 @@ export async function runClaudeLogin(
         );
         break;
       }
-      current = await client.get(terminal.id);
+      current = await client.get(terminal.id, signal);
     }
   } catch (error) {
     outcomeError =
@@ -400,7 +277,7 @@ export async function runClaudeAuthStatus(
       if (signal?.aborted) throw new Error(AUTH_STATUS_ERROR);
       if (current.status === "running") {
         try {
-          return parseClaudeAuthStatus(await client.output(terminal.id));
+          return parseClaudeAuthStatus(await client.output(terminal.id, signal));
         } catch {
           // The filtered result may not be in scrollback yet, or the helper may
           // have exited between the status read and the output request.
@@ -414,7 +291,7 @@ export async function runClaudeAuthStatus(
       }
       await waitForNextPoll(sleep, pollMs, signal);
       if (signal?.aborted) throw new Error(AUTH_STATUS_ERROR);
-      current = await client.get(terminal.id);
+      current = await client.get(terminal.id, signal);
     }
   } finally {
     try {

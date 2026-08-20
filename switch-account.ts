@@ -38,16 +38,20 @@ export interface ThreadSnapshot {
 }
 
 export interface AccountSwitchDependencies {
-  getThread(threadId: string): Promise<ThreadSnapshot>;
+  getThread(threadId: string, signal: AbortSignal): Promise<ThreadSnapshot>;
   login(
     threadId: string,
     hostId: string,
     signal: AbortSignal,
     onSuccess?: () => void,
   ): Promise<void>;
-  reconcileCleanup(hostId: string): Promise<void>;
+  reconcileCleanup(hostId: string, signal: AbortSignal): Promise<void>;
   stopThread(threadId: string): Promise<void>;
-  verifySubscription(threadId: string, hostId: string): Promise<void>;
+  verifySubscription(
+    threadId: string,
+    hostId: string,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface AccountSwitchRequest {
@@ -66,8 +70,9 @@ interface SessionAction {
 async function classifySession(
   dependencies: AccountSwitchDependencies,
   threadId: string,
+  signal: AbortSignal,
 ): Promise<SessionAction> {
-  const thread = await dependencies.getThread(threadId);
+  const thread = await dependencies.getThread(threadId, signal);
   if (thread.providerId !== CLAUDE_PROVIDER_ID) {
     throw new Error("This button only works in Claude Code sessions.");
   }
@@ -104,7 +109,7 @@ export async function switchClaudeAccount(
   { outcome: "ready-next-message" } | { outcome: "login-changed-not-rebound" }
 > {
   throwIfCancelled(signal);
-  const initial = await classifySession(dependencies, request.threadId);
+  const initial = await classifySession(dependencies, request.threadId, signal);
   throwIfCancelled(signal);
   if (hostLocks.has(initial.hostId)) {
     throw new Error("A Claude account switch is already open on this machine.");
@@ -112,7 +117,7 @@ export async function switchClaudeAccount(
 
   hostLocks.add(initial.hostId);
   try {
-    await dependencies.reconcileCleanup(initial.hostId);
+    await dependencies.reconcileCleanup(initial.hostId, signal);
     throwIfCancelled(signal);
     if (request.mode === "login") {
       let loginCommitted = false;
@@ -128,7 +133,7 @@ export async function switchClaudeAccount(
     }
 
     try {
-      await dependencies.verifySubscription(request.threadId, initial.hostId);
+      await dependencies.verifySubscription(request.threadId, initial.hostId, signal);
     } catch (error) {
       if (request.mode === "login") {
         return { outcome: "login-changed-not-rebound" };
@@ -139,7 +144,7 @@ export async function switchClaudeAccount(
     if (request.mode === "current") throwIfCancelled(signal);
     let current: SessionAction;
     try {
-      current = await classifySession(dependencies, request.threadId);
+      current = await classifySession(dependencies, request.threadId, signal);
     } catch (error) {
       if (request.mode === "login") {
         return { outcome: "login-changed-not-rebound" };

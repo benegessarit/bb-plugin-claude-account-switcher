@@ -2,11 +2,23 @@
   "name": "bb-plugin-claude-account-switcher",
   "version": "0.1.0",
   "description": "Switch the machine-wide Claude subscription used by one BB Claude Code session without restarting BB.",
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "bb-plugin",
+    "claude-code",
+    "account-switching"
+  ],
   "type": "module",
   "engines": {
     "bb": ">=0.38",
     "bbPluginSdk": ">=0.4.6"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "bb": {
     "name": "Claude Account Switcher",
     "description": "Rebind one BB Claude Code session to the verified subscription login on its machine.",
@@ -20,7 +32,8 @@
     "build": "bb plugin build",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
-    "test": "bb plugin build && node --test tests/*.test.ts && vitest run tests/app.test.tsx",
+    "prepack": "npm run build",
+    "test": "bb plugin build && node --test --test-timeout=15000 tests/*.test.ts && vitest run tests/app.test.tsx",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
