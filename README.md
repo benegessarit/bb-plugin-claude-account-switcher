@@ -11,7 +11,8 @@ The session header button has two paths:
 
 - BB 0.38 or newer.
 - macOS or Linux for BB and the target session machine. The host helpers require
-  `/bin/sh` and `/bin/stty`.
+  `/bin/sh`, `/bin/stty`, and `mktemp` at `/usr/bin`, `/bin`, or on the trusted
+  host `PATH`.
 - Claude Code available on the session machine, with Node.js available as `node`
   on that machine's trusted `PATH`.
 - A Claude.ai Pro, Max, Team, or Enterprise login. Console/API-key authentication is intentionally rejected.

@@ -214,6 +214,14 @@ test("authorization codes are accepted only after the no-echo readiness marker",
 
   try {
     await created;
+    const loginRequest = host.harness.inspection.sdk.callsTo(
+      "terminals.create",
+    )[0]![0] as { readonly start?: { readonly command?: string } };
+    const loginCommand = loginRequest.start?.command ?? "";
+    assert.match(loginCommand, /BROWSER=/);
+    assert.match(loginCommand, /--incognito/);
+    assert.match(loginCommand, /--new-window/);
+    assert.doesNotMatch(loginCommand, /--email|--user-data-dir|open -n|open -na/);
     await assert.rejects(
       host.harness.behavior.callRpc("submitLoginCode", {
         operationId: DEFAULT_OPERATION_ID,

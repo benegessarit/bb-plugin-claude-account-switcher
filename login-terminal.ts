@@ -4,19 +4,26 @@ function shellQuote(value: string): string {
 
 export const LOGIN_INPUT_READY_MARKER = "BB_CLAUDE_LOGIN_INPUT_READY";
 
-function requireAbsoluteClaudePath(claudeExecutablePath: string): string {
-  if (!claudeExecutablePath.startsWith("/") || claudeExecutablePath.includes("\0")) {
-    throw new Error("BB could not resolve the installed Claude Code executable.");
+function requireAbsoluteExecutablePath(value: string, error: string): string {
+  if (!value.startsWith("/") || value.includes("\0")) {
+    throw new Error(error);
   }
-  return claudeExecutablePath;
+  return value;
+}
+
+function requireAbsoluteClaudePath(claudeExecutablePath: string): string {
+  return requireAbsoluteExecutablePath(
+    claudeExecutablePath,
+    "BB could not resolve the installed Claude Code executable.",
+  );
 }
 
 export function buildChromeIncognitoLauncher(browserExecutablePath?: string): string {
-  if (
-    browserExecutablePath !== undefined &&
-    (!browserExecutablePath.startsWith("/") || browserExecutablePath.includes("\0"))
-  ) {
-    throw new Error("BB could not resolve the Chrome executable.");
+  if (browserExecutablePath !== undefined) {
+    requireAbsoluteExecutablePath(
+      browserExecutablePath,
+      "BB could not resolve the Chrome executable.",
+    );
   }
 
   const launch = (browser: string) =>
@@ -26,39 +33,63 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     'url="${1-}"',
     'case "$url" in https://*) ;; *) exit 78 ;; esac',
   ];
-  if (browserExecutablePath) lines.push(launch(browserExecutablePath));
-  lines.push(
-    'if test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
-    `  ${launch("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")}`,
-    "fi",
-    'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
-    '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
-    "fi",
-    "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
-    '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
-    '  if test -n "$browser_path"; then',
-    '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
-    "  fi",
-    "done",
-    "exit 78",
-  );
+  const fixedBrowserPaths = browserExecutablePath
+    ? [browserExecutablePath]
+    : ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"];
+  for (const browserPath of fixedBrowserPaths) {
+    lines.push(
+      `if test -x ${shellQuote(browserPath)}; then`,
+      `  ${launch(browserPath)}`,
+      "fi",
+    );
+  }
+  if (!browserExecutablePath) {
+    lines.push(
+      'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
+      '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
+      "fi",
+      "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
+      '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
+      '  if test -n "$browser_path"; then',
+      '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
+      "  fi",
+      "done",
+    );
+  }
+  lines.push("exit 78");
   return `${lines.join("\n")}\n`;
 }
 
-export function buildClaudeLoginCommand(claudeExecutablePath: string): string {
+export interface ClaudeLoginCommandOptions {
+  readonly browserExecutablePath?: string;
+  readonly sttyExecutablePath?: string;
+}
+
+export function buildClaudeLoginCommand(
+  claudeExecutablePath: string,
+  options: ClaudeLoginCommandOptions = {},
+): string {
   const executable = requireAbsoluteClaudePath(claudeExecutablePath);
-  const browserLauncher = buildChromeIncognitoLauncher();
+  const browserLauncher = buildChromeIncognitoLauncher(options.browserExecutablePath);
+  const sttyExecutable = requireAbsoluteExecutablePath(
+    options.sttyExecutablePath ?? "/bin/stty",
+    "BB could not resolve the stty executable.",
+  );
   const script = [
-    'browser_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
+    'mktemp_command=""',
+    'for candidate in /usr/bin/mktemp /bin/mktemp; do if test -x "$candidate"; then mktemp_command="$candidate"; break; fi; done',
+    'if test -z "$mktemp_command"; then mktemp_command="$(command -v mktemp 2>/dev/null || true)"; fi',
+    'test -n "$mktemp_command" || exit 78',
+    'browser_dir="$("$mktemp_command" -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
     'browser_launcher="$browser_dir/open-chrome-incognito"',
-    'cleanup_login() { /bin/stty echo >/dev/null 2>&1 || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }',
+    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
     "trap cleanup_login EXIT",
     "trap 'exit 129' HUP",
     "trap 'exit 130' INT",
     "trap 'exit 143' TERM",
     `/usr/bin/printf '%s' ${shellQuote(browserLauncher)} > "$browser_launcher" || exit 78`,
     '/bin/chmod 700 "$browser_launcher" || exit 78',
-    "/bin/stty -echo >/dev/null 2>&1 || exit 79",
+    `${shellQuote(sttyExecutable)} -echo >/dev/null 2>&1 || exit 79`,
     `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
     `BROWSER="$browser_launcher" ${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
   ].join("; ");

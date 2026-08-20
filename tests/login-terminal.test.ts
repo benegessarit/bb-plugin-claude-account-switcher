@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
@@ -41,8 +49,9 @@ test("the login command routes authorization through Chrome Incognito", () => {
   const command = buildClaudeLoginCommand("/opt/trusted claude/bin/claude");
 
   assert.match(command, /^\/bin\/sh -c /);
-  assert.match(command, /\/bin\/stty -echo/);
-  assert.match(command, /\/bin\/stty echo/);
+  assert.match(command, /\/bin\/stty/);
+  assert.match(command, /-echo/);
+  assert.match(command, /\/bin\/stty.*echo/);
   assert.doesNotMatch(command, /BB_CLAUDE_LOGIN_INPUT_READY/);
   assert.match(command, /BB_CLAUDE_LOGIN_/);
   assert.match(command, /INPUT_READY/);
@@ -54,6 +63,7 @@ test("the login command routes authorization through Chrome Incognito", () => {
   assert.match(command, /--new-window/);
   assert.match(command, /\/bin\/unlink/);
   assert.match(command, /\/bin\/rmdir/);
+  assert.match(command, /command -v mktemp/);
   assert.doesNotMatch(command, /--email|--user-data-dir|open -n|open -na/);
 });
 
@@ -112,6 +122,65 @@ test("the Incognito launcher rejects non-HTTPS browser targets", async () => {
 
     assert.equal(result.status, 78, result.stderr);
     await assert.rejects(access(browserArgs));
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the complete login command launches Chrome Incognito and removes its helper", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-command-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      'test "$1" = auth && test "$2" = login && test "$3" = --claudeai || exit 91',
+      'exec "$BROWSER" "https://claude.com/cai/oauth/authorize"',
+    ].join("\n"),
+  );
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const command = buildClaudeLoginCommand(fakeClaude, {
+      browserExecutablePath: fakeBrowser,
+      sttyExecutablePath: fakeStty,
+    });
+    assert.ok(
+      command.includes(fakeBrowser),
+      "the test browser must be embedded before the command can execute",
+    );
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BB_SWITCH_BROWSER_ARGS: browserArgs,
+        TMPDIR: fixtureRoot,
+      },
+      timeout: 5_000,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      "https://claude.com/cai/oauth/authorize",
+    ]);
+    assert.equal(
+      (await readdir(fixtureRoot)).some((name) => name.startsWith("bb-claude-login.")),
+      false,
+    );
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
   }
