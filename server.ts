@@ -28,6 +28,7 @@ interface ActiveSwitch {
   readonly mode: "current" | "login";
   readonly result: Promise<SwitchResult>;
   readonly settled: Promise<void>;
+  loginCodeSubmitting: boolean;
   loginTerminal?: { readonly hostId: string; readonly id: string };
   phase: SwitchPhase;
 }
@@ -246,7 +247,10 @@ export default async function plugin(bb: BbPluginApi) {
       const active = activeSwitches.get(threadId);
       if (!active) return { status: "none" as const };
       return {
-        codeReady: active.loginTerminal !== undefined,
+        codeReady:
+          active.phase === "cancellable" &&
+          active.loginTerminal !== undefined &&
+          !active.loginCodeSubmitting,
         mode: active.mode,
         operationId: active.id,
         phase: active.phase,
@@ -256,22 +260,35 @@ export default async function plugin(bb: BbPluginApi) {
 
     async submitLoginCode({ code, operationId, threadId }) {
       const active = activeSwitches.get(threadId);
-      const terminalId = active?.loginTerminal?.id;
+      const terminal = active?.loginTerminal;
       if (
         !active ||
         active.id !== operationId ||
         active.mode !== "login" ||
         active.phase !== "cancellable" ||
-        !terminalId
+        active.loginCodeSubmitting ||
+        !terminal
       ) {
         throw new Error("Claude login is not waiting for an authorization code.");
       }
-      active.loginTerminal = undefined;
-      await bb.sdk.terminals.input({
-        dataBase64: Buffer.from(`${code}\n`, "utf8").toString("base64"),
-        terminalId,
-      });
-      return { submitted: true as const };
+      active.loginCodeSubmitting = true;
+      try {
+        await bb.sdk.terminals.input({
+          dataBase64: Buffer.from(`${code}\n`, "utf8").toString("base64"),
+          terminalId: terminal.id,
+        });
+        if (
+          activeSwitches.get(threadId) === active &&
+          active.loginTerminal === terminal
+        ) {
+          active.loginTerminal = undefined;
+        }
+        return { submitted: true as const };
+      } finally {
+        if (activeSwitches.get(threadId) === active) {
+          active.loginCodeSubmitting = false;
+        }
+      }
     },
 
     async switchAccount({ mode, operationId, threadId }) {
@@ -297,6 +314,7 @@ export default async function plugin(bb: BbPluginApi) {
       const active: ActiveSwitch = {
         controller,
         id: operationId,
+        loginCodeSubmitting: false,
         mode,
         phase: "cancellable",
         result,

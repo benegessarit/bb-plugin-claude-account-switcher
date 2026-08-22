@@ -301,8 +301,9 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
           {switchingMode === "login" && (
             <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
               <p className="text-sm text-muted-foreground">
-                BB opens at most one Chrome Incognito window for this switch so Claude
-                does not reuse the account signed in to your normal window.
+                BB asks Chrome at most once for this switch. It does not use cookies
+                from your normal windows. Existing Incognito windows share one session,
+                so close them first if you need a fresh Claude sign-in.
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Icon name="Loading" className="animate-spin" aria-hidden="true" />
@@ -315,9 +316,9 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Choose the account there. Chrome may still offer saved passwords from
-                that profile. Leave this dialog open; BB finishes only after Claude Code
-                confirms the login.
+                Choose the account there. Chrome may offer passwords from the active
+                profile; BB never reads or copies them. Leave this dialog open until
+                Claude Code confirms the login.
               </p>
               {switchPhase === "cancellable" && !codeExpanded ? (
                 <Button

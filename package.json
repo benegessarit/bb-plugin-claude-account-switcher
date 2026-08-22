@@ -13,7 +13,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.38",
-    "bbPluginSdk": ">=0.4.6"
+    "bbPluginSdk": ">=0.4.8"
   },
   "os": [
     "darwin",

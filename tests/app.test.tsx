@@ -125,7 +125,7 @@ test("sign-in starts on Claude's website without an email field", async () => {
   }
 });
 
-test("the browser handoff explains why BB opens Chrome Incognito", async () => {
+test("the browser handoff states only what BB and Incognito control", async () => {
   let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
   const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
     finishSwitch = resolve;
@@ -144,10 +144,61 @@ test("the browser handoff explains why BB opens Chrome Incognito", async () => {
     fireEvent.click(
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
-    expect(await slot.findByText(/one Chrome Incognito window/i)).not.toBeNull();
-    expect(await slot.findByText(/may still offer saved passwords/i)).not.toBeNull();
+    expect(await slot.findByText(/BB asks Chrome at most once/i)).not.toBeNull();
+    expect(
+      await slot.findByText(/does not use cookies from your normal windows/i),
+    ).not.toBeNull();
+    expect(
+      await slot.findByText(/Existing Incognito windows share one session/i),
+    ).not.toBeNull();
+    expect(
+      await slot.findByText(/may offer passwords from the active profile/i),
+    ).not.toBeNull();
+    expect(await slot.findByText(/BB never reads or copies them/i)).not.toBeNull();
     expect(await slot.findByText(/Leave this dialog open/i)).not.toBeNull();
+    expect(slot.queryByText(/one Chrome Incognito window/i)).toBeNull();
+    expect(slot.queryByText(/email to prefill/i)).toBeNull();
+    expect(slot.queryByRole("textbox", { name: /email/i })).toBeNull();
     expect(slot.queryByText(/home screen/i)).toBeNull();
+  } finally {
+    finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
+test("a remounted pending code submission cannot submit a duplicate", async () => {
+  let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
+  const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    inspectSwitch: async () => ({
+      codeReady: false,
+      mode: "login" as const,
+      operationId: OPERATION_ID,
+      phase: "cancellable" as const,
+      status: "running" as const,
+    }),
+  });
+
+  try {
+    fireEvent.click(await slot.findByRole("button", { name: "Claude showed a code?" }));
+    const code = await slot.findByLabelText("Authorization code");
+    fireEvent.change(code, {
+      target: { value: "duplicate-code" },
+    });
+    const submit = code.parentElement?.querySelector("button");
+    expect(submit).not.toBeNull();
+    if (!submit) throw new Error("Expected authorization-code submit button.");
+    expect(submit.textContent).toBe("Waiting for Claude…");
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(
+      slot.inspection.rpcCalls.some(({ method }) => method === "submitLoginCode"),
+    ).toBe(false);
   } finally {
     finishSwitch({ outcome: "ready-next-message" });
     await switchResult;

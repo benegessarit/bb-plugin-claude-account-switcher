@@ -7,6 +7,16 @@ import plugin from "../dist/server.js";
 const DEFAULT_OPERATION_ID = "a5a3434e-3728-4951-8c3f-a17ca2f5f234";
 const STALE_OPERATION_ID = "00000000-0000-4000-8000-000000000000";
 
+type InspectedSwitch =
+  | { readonly status: "none" }
+  | {
+      readonly codeReady: boolean;
+      readonly mode: "current" | "login";
+      readonly operationId: string;
+      readonly phase: "cancellable" | "cancelling" | "committed";
+      readonly status: "running";
+    };
+
 const providerCliStatus = {
   claudeCode: {
     currentVersion: "2.1.235",
@@ -140,7 +150,7 @@ test("the current-login RPC verifies the exact host and releases an idle runtime
   }
 });
 
-test("authorization codes are accepted only after the no-echo readiness marker", async () => {
+test("authorization code delivery is gated, serialized, and retry-safe", async () => {
   let loginCreated!: () => void;
   const created = new Promise<void>((resolve) => {
     loginCreated = resolve;
@@ -149,6 +159,15 @@ test("authorization codes are accepted only after the no-echo readiness marker",
   const markerGate = new Promise<void>((resolve) => {
     releaseMarker = resolve;
   });
+  let inputStarted!: () => void;
+  const firstInputStarted = new Promise<void>((resolve) => {
+    inputStarted = resolve;
+  });
+  let rejectFirstInput!: (error: Error) => void;
+  const firstInput = new Promise<never>((_resolve, reject) => {
+    rejectFirstInput = reject;
+  });
+  let inputAttempts = 0;
   const host = createFakePluginHost({
     pluginId: "claude-account-switcher",
     sdk: {
@@ -174,12 +193,19 @@ test("authorization codes are accepted only after the no-echo readiness marker",
           id: "login_terminal",
           status: "running" as const,
         }),
-        input: async () => ({
-          exitCode: null,
-          hostId: "host_1",
-          id: "login_terminal",
-          status: "running" as const,
-        }),
+        input: async () => {
+          inputAttempts += 1;
+          if (inputAttempts === 1) {
+            inputStarted();
+            await firstInput;
+          }
+          return {
+            exitCode: null,
+            hostId: "host_1",
+            id: "login_terminal",
+            status: "running" as const,
+          };
+        },
         output: async () => {
           await markerGate;
           return {
@@ -211,6 +237,14 @@ test("authorization codes are accepted only after the no-echo readiness marker",
     mode: "login",
     threadId: "thread_1",
   });
+  const inspectCodeReady = async () => {
+    const inspected = (await host.harness.behavior.callRpc("inspectSwitch", {
+      threadId: "thread_1",
+    })) as InspectedSwitch;
+    assert.equal(inspected.status, "running");
+    if (inspected.status !== "running") throw new Error("Expected active switch.");
+    return inspected.codeReady;
+  };
 
   try {
     await created;
@@ -233,6 +267,7 @@ test("authorization codes are accepted only after the no-echo readiness marker",
 
     releaseMarker();
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(await inspectCodeReady(), true);
     await assert.rejects(
       host.harness.behavior.callRpc("submitLoginCode", {
         code: "stale-code",
@@ -241,14 +276,35 @@ test("authorization codes are accepted only after the no-echo readiness marker",
       }),
       /not waiting for an authorization code/,
     );
+    const firstSubmission = host.harness.behavior.callRpc("submitLoginCode", {
+      operationId: DEFAULT_OPERATION_ID,
+      code: "first-code",
+      threadId: "thread_1",
+    });
+    await firstInputStarted;
+    assert.equal(await inspectCodeReady(), false);
+    await assert.rejects(
+      host.harness.behavior.callRpc("submitLoginCode", {
+        operationId: DEFAULT_OPERATION_ID,
+        code: "overlapping-code",
+        threadId: "thread_1",
+      }),
+      /not waiting for an authorization code/,
+    );
+    const firstFailure = assert.rejects(firstSubmission, /terminal input failed/);
+    rejectFirstInput(new Error("terminal input failed"));
+    await firstFailure;
+    assert.equal(await inspectCodeReady(), true);
+
     assert.deepEqual(
       await host.harness.behavior.callRpc("submitLoginCode", {
         operationId: DEFAULT_OPERATION_ID,
-        code: "one-time-code",
+        code: "retry-code",
         threadId: "thread_1",
       }),
       { submitted: true },
     );
+    assert.equal(await inspectCodeReady(), false);
     await assert.rejects(
       host.harness.behavior.callRpc("submitLoginCode", {
         operationId: DEFAULT_OPERATION_ID,
@@ -260,7 +316,13 @@ test("authorization codes are accepted only after the no-echo readiness marker",
     assert.deepEqual(host.harness.inspection.sdk.callsTo("terminals.input"), [
       [
         {
-          dataBase64: Buffer.from("one-time-code\n").toString("base64"),
+          dataBase64: Buffer.from("first-code\n").toString("base64"),
+          terminalId: "login_terminal",
+        },
+      ],
+      [
+        {
+          dataBase64: Buffer.from("retry-code\n").toString("base64"),
           terminalId: "login_terminal",
         },
       ],
@@ -273,6 +335,178 @@ test("authorization codes are accepted only after the no-echo readiness marker",
     });
     await switching.catch(() => undefined);
     await host.harness.lifecycle.dispose();
+  }
+});
+
+test("late code delivery cannot mutate a replacement switch", async () => {
+  for (const lateOutcome of ["resolve", "reject"] as const) {
+    let terminalCreates = 0;
+    let firstInputStarted!: () => void;
+    const inputStarted = new Promise<void>((resolve) => {
+      firstInputStarted = resolve;
+    });
+    let resolveFirstInput!: (value: {
+      exitCode: null;
+      hostId: string;
+      id: string;
+      status: "running";
+    }) => void;
+    let rejectFirstInput!: (error: Error) => void;
+    const firstInput = new Promise<{
+      exitCode: null;
+      hostId: string;
+      id: string;
+      status: "running";
+    }>((resolve, reject) => {
+      resolveFirstInput = resolve;
+      rejectFirstInput = reject;
+    });
+    let inputAttempts = 0;
+    const host = createFakePluginHost({
+      pluginId: "claude-account-switcher",
+      sdk: {
+        terminals: {
+          close: async (request) => ({
+            exitCode: 1,
+            hostId: "host_1",
+            id: request.terminalId,
+            status: "exited" as const,
+          }),
+          create: async () => {
+            terminalCreates += 1;
+            return {
+              exitCode: null,
+              hostId: "host_1",
+              id: `login_terminal_${terminalCreates}`,
+              status: "running" as const,
+            };
+          },
+          get: async (request) => ({
+            exitCode: null,
+            hostId: "host_1",
+            id: request.terminalId,
+            status: "running" as const,
+          }),
+          input: async () => {
+            inputAttempts += 1;
+            if (inputAttempts === 1) {
+              firstInputStarted();
+              return firstInput;
+            }
+            throw new Error("Unexpected second terminal input.");
+          },
+          output: async () => ({
+            chunks: [
+              {
+                dataBase64: Buffer.from("BB_CLAUDE_LOGIN_INPUT_READY\n").toString(
+                  "base64",
+                ),
+                seq: 1,
+              },
+            ],
+            nextSeq: 2,
+            truncated: false,
+          }),
+        },
+        threads: {
+          get: async () => ({
+            environment: { hostId: "host_1" },
+            providerId: "claude-code",
+            status: "idle" as const,
+          }),
+        },
+      },
+    });
+    await plugin(host.bb);
+    const waitForCode = async (operationId: string) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const inspected = (await host.harness.behavior.callRpc("inspectSwitch", {
+          threadId: "thread_1",
+        })) as InspectedSwitch;
+        if (
+          inspected.status === "running" &&
+          inspected.operationId === operationId &&
+          inspected.codeReady
+        ) {
+          return;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error(`Authorization code did not become ready for ${operationId}.`);
+    };
+    const firstSwitch = host.harness.behavior.callRpc("switchAccount", {
+      operationId: DEFAULT_OPERATION_ID,
+      mode: "login",
+      threadId: "thread_1",
+    });
+    let firstSubmission: Promise<unknown> | undefined;
+    let secondSwitch: Promise<unknown> | undefined;
+
+    try {
+      await waitForCode(DEFAULT_OPERATION_ID);
+      const pendingSubmission = host.harness.behavior.callRpc("submitLoginCode", {
+        code: "first-code",
+        operationId: DEFAULT_OPERATION_ID,
+        threadId: "thread_1",
+      });
+      firstSubmission = pendingSubmission;
+      await inputStarted;
+
+      assert.deepEqual(
+        await host.harness.behavior.callRpc("cancelSwitch", {
+          operationId: DEFAULT_OPERATION_ID,
+          threadId: "thread_1",
+        }),
+        { outcome: "cancelled-before-login" },
+      );
+      assert.deepEqual(await firstSwitch, { outcome: "cancelled" });
+
+      secondSwitch = host.harness.behavior.callRpc("switchAccount", {
+        operationId: STALE_OPERATION_ID,
+        mode: "login",
+        threadId: "thread_1",
+      });
+      await waitForCode(STALE_OPERATION_ID);
+
+      if (lateOutcome === "resolve") {
+        resolveFirstInput({
+          exitCode: null,
+          hostId: "host_1",
+          id: "login_terminal_1",
+          status: "running",
+        });
+        assert.deepEqual(await pendingSubmission, { submitted: true });
+      } else {
+        const rejected = assert.rejects(pendingSubmission, /late input failure/);
+        rejectFirstInput(new Error("late input failure"));
+        await rejected;
+      }
+
+      const inspected = (await host.harness.behavior.callRpc("inspectSwitch", {
+        threadId: "thread_1",
+      })) as InspectedSwitch;
+      assert.equal(inspected.status, "running");
+      if (inspected.status !== "running") throw new Error("Expected active switch.");
+      assert.equal(inspected.operationId, STALE_OPERATION_ID);
+      assert.equal(inspected.codeReady, true);
+    } finally {
+      resolveFirstInput({
+        exitCode: null,
+        hostId: "host_1",
+        id: "login_terminal_1",
+        status: "running",
+      });
+      await firstSubmission?.catch(() => undefined);
+      await host.harness.behavior
+        .callRpc("cancelSwitch", {
+          operationId: STALE_OPERATION_ID,
+          threadId: "thread_1",
+        })
+        .catch(() => undefined);
+      await secondSwitch?.catch(() => undefined);
+      await firstSwitch.catch(() => undefined);
+      await host.harness.lifecycle.dispose();
+    }
   }
 });
 
