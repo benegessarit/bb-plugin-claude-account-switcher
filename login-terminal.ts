@@ -26,12 +26,17 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     );
   }
 
-  const launch = (browser: string) =>
-    `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`;
+  const launch = (browser: string) => [
+    `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`,
+    '/bin/unlink "$claim" 2>/dev/null || true',
+    "exit 78",
+  ];
   const lines = [
     "#!/bin/sh",
     'url="${1-}"',
     'case "$url" in https://*) ;; *) exit 78 ;; esac',
+    'claim="${0}.opened"',
+    '(set -C; : > "$claim") 2>/dev/null || exit 0',
   ];
   const fixedBrowserPaths = browserExecutablePath
     ? [browserExecutablePath]
@@ -39,7 +44,7 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
   for (const browserPath of fixedBrowserPaths) {
     lines.push(
       `if test -x ${shellQuote(browserPath)}; then`,
-      `  ${launch(browserPath)}`,
+      ...launch(browserPath).map((line) => `  ${line}`),
       "fi",
     );
   }
@@ -47,16 +52,20 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     lines.push(
       'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
       '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
+      '  /bin/unlink "$claim" 2>/dev/null || true',
+      "  exit 78",
       "fi",
       "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
       '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
       '  if test -n "$browser_path"; then',
       '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
+      '    /bin/unlink "$claim" 2>/dev/null || true',
+      "    exit 78",
       "  fi",
       "done",
     );
   }
-  lines.push("exit 78");
+  lines.push('/bin/unlink "$claim" 2>/dev/null || true', "exit 78");
   return `${lines.join("\n")}\n`;
 }
 
@@ -82,7 +91,8 @@ export function buildClaudeLoginCommand(
     'test -n "$mktemp_command" || exit 78',
     'browser_dir="$("$mktemp_command" -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
     'browser_launcher="$browser_dir/open-chrome-incognito"',
-    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
+    'browser_claim="$browser_launcher.opened"',
+    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
     "trap cleanup_login EXIT",
     "trap 'exit 129' HUP",
     "trap 'exit 130' INT",

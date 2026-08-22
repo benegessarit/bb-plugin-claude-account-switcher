@@ -4,7 +4,7 @@ Switch the machine-wide Claude subscription used by one BB Claude Code session w
 
 The session header button has two paths:
 
-- **Use current login** verifies the Claude login already active on the session's machine, then releases only the selected session's loaded runtime.
+- **Use current login** verifies the Claude login already active on the session's machine, then asks BB to release the selected session's loaded runtime.
 - **Sign in to another account** starts Claude Code's standard subscription login through one Chrome Incognito window. This prevents an existing Claude website cookie from silently selecting the wrong account. Chrome may still offer passwords saved in the active profile.
 
 ## Requirements
@@ -40,13 +40,13 @@ Disable or remove it with `bb plugin disable claude-account-switcher` or `bb plu
    showed a code?** and submit it once.
 5. Send the next message in the same thread.
 
-BB opens one Incognito window and waits for Claude Code to finish. Reaching Claude's home screen without a successful CLI completion does not complete the switch.
+BB opens at most one Incognito window for each switch and waits for Claude Code to finish. Reaching Claude's home screen without a successful CLI completion does not complete the switch.
 
 ## Security and limits
 
 - BB plugins run with the user's BB privileges. This plugin can launch a host terminal command and stop the selected BB thread runtime. Install it only from a publisher you trust.
 - The plugin never reads Claude credential files or macOS Keychain.
-- The plugin gives Claude Code a short-lived browser launcher that opens Chrome with `--incognito --new-window`. It invokes the existing Chrome executable directly, without `open -n` or a temporary `--user-data-dir`, so Chrome can reuse its running application and profile password store while excluding normal Claude website cookies. The launcher accepts only HTTPS URLs and is removed after normal completion or graceful cancellation.
+- The plugin gives Claude Code a short-lived browser launcher that opens Chrome with `--incognito --new-window`. An operation-local atomic claim lets only the first HTTPS request open Chrome; later requests exit successfully without another window. It invokes the existing Chrome executable directly, without `open -n` or a temporary `--user-data-dir`, so Chrome can reuse its running application and profile password store while excluding normal Claude website cookies. The launcher and claim are removed after normal completion or graceful cancellation.
 - The plugin uses the exact Claude Code executable reported by BB for the session's machine. It does not select Claude from the terminal's `PATH`.
 - The small auth-status filtering helper uses `node` from the session machine's
   `PATH`. Treat that host `PATH` as part of the plugin's trust boundary.

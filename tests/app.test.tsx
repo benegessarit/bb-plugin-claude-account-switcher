@@ -193,18 +193,106 @@ test("a remounted action reattaches to the active server-side switch", async () 
   }
 });
 
+test("a remounted action restores the server cancellation phase", async () => {
+  let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
+  const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  const cancelSwitch = vi.fn(async () => ({ outcome: "completing" as const }));
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    cancelSwitch,
+    inspectSwitch: async () => ({
+      codeReady: false,
+      mode: "login" as const,
+      operationId: OPERATION_ID,
+      phase: "cancelling" as const,
+      status: "running" as const,
+    }),
+  });
+
+  try {
+    expect(await slot.findByText("Cancelling Claude login…")).not.toBeNull();
+    expect(slot.queryByRole("button", { name: "Claude showed a code?" })).toBeNull();
+    fireEvent.click(await slot.findByRole("button", { name: "Close account switch" }));
+    expect(cancelSwitch).not.toHaveBeenCalled();
+  } finally {
+    finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
+test("a remounted action keeps tracking the phase after code input is ready", async () => {
+  let finishSwitch!: (result: { outcome: "ready-next-message" }) => void;
+  const switchResult = new Promise<{ outcome: "ready-next-message" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  let phase: "cancellable" | "committed" = "cancellable";
+  let inspections = 0;
+  const cancelSwitch = vi.fn(async () => ({ outcome: "completing" as const }));
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    cancelSwitch,
+    inspectSwitch: async () => {
+      inspections += 1;
+      return {
+        codeReady: true,
+        mode: "login" as const,
+        operationId: OPERATION_ID,
+        phase,
+        status: "running" as const,
+      };
+    },
+  });
+
+  try {
+    expect(
+      await slot.findByText("Finish signing in on Claude's website."),
+    ).not.toBeNull();
+    await waitFor(() => expect(inspections).toBeGreaterThanOrEqual(2));
+    phase = "committed";
+
+    expect(
+      await slot.findByText("Claude login changed. BB is finishing the switch…"),
+    ).not.toBeNull();
+    fireEvent.click(await slot.findByRole("button", { name: "Close account switch" }));
+    expect(cancelSwitch).not.toHaveBeenCalled();
+  } finally {
+    finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
 test("the authorization-code fallback is disclosed only while login waits", async () => {
-  let rejectSwitch!: (error: Error) => void;
-  const switchResult = new Promise<never>((_resolve, reject) => {
-    rejectSwitch = reject;
+  let finishSwitch!: (result: { outcome: "cancelled" }) => void;
+  let loginStarted = false;
+  const switchResult = new Promise<{ outcome: "cancelled" }>((resolve) => {
+    finishSwitch = resolve;
   });
   const slot = await renderAction({
     ...defaultRpc,
     cancelSwitch: async () => {
-      rejectSwitch(new Error("Claude login was cancelled."));
+      finishSwitch({ outcome: "cancelled" });
       return { outcome: "cancelled-before-login" as const };
     },
-    switchAccount: async () => switchResult,
+    inspectSwitch: async () =>
+      loginStarted
+        ? {
+            codeReady: true,
+            mode: "login" as const,
+            operationId: OPERATION_ID,
+            phase: "cancellable" as const,
+            status: "running" as const,
+          }
+        : { status: "none" as const },
+    switchAccount: async () => {
+      loginStarted = true;
+      return switchResult;
+    },
   });
 
   try {
@@ -239,9 +327,10 @@ test("the authorization-code fallback is disclosed only while login waits", asyn
       method: "cancelSwitch",
       input: { operationId: OPERATION_ID, threadId: "thread_1" },
     });
+    expect(toast.error).not.toHaveBeenCalled();
   } finally {
-    rejectSwitch(new Error("test cleanup"));
-    await switchResult.catch(() => undefined);
+    finishSwitch({ outcome: "cancelled" });
+    await switchResult;
     slot.lifecycle.unmount();
   }
 });

@@ -11,6 +11,7 @@ import { HostReservations, switchClaudeAccount } from "./switch-account";
 
 type SwitchPhase = "cancellable" | "cancelling" | "committed";
 type SwitchResult =
+  | { readonly outcome: "cancelled" }
   | { readonly outcome: "ready-next-message" }
   | { readonly outcome: "login-changed-not-rebound" };
 
@@ -27,6 +28,7 @@ interface ActiveSwitch {
   readonly mode: "current" | "login";
   readonly result: Promise<SwitchResult>;
   readonly settled: Promise<void>;
+  loginTerminal?: { readonly hostId: string; readonly id: string };
   phase: SwitchPhase;
 }
 
@@ -80,7 +82,6 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.get<unknown>(UNCLEAN_TERMINALS_KEY),
   );
   const activeTerminals = new Set(uncleanTerminals.keys());
-  const activeLoginTerminals = new Map<string, string>();
   const activeSwitches = new Map<string, ActiveSwitch>();
   const cleanupReconciliations = new Map<string, Promise<void>>();
   let cleanupPersistence: Promise<void> = Promise.resolve();
@@ -110,8 +111,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function settleTerminal(terminalId: string): Promise<void> {
     activeTerminals.delete(terminalId);
-    for (const [threadId, loginTerminalId] of activeLoginTerminals) {
-      if (loginTerminalId === terminalId) activeLoginTerminals.delete(threadId);
+    for (const active of activeSwitches.values()) {
+      if (active.loginTerminal?.id === terminalId) active.loginTerminal = undefined;
     }
     const wasUnclean = uncleanTerminals.delete(terminalId);
     if (wasUnclean) await persistUncleanTerminals();
@@ -245,7 +246,7 @@ export default async function plugin(bb: BbPluginApi) {
       const active = activeSwitches.get(threadId);
       if (!active) return { status: "none" as const };
       return {
-        codeReady: activeLoginTerminals.has(threadId),
+        codeReady: active.loginTerminal !== undefined,
         mode: active.mode,
         operationId: active.id,
         phase: active.phase,
@@ -255,7 +256,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     async submitLoginCode({ code, operationId, threadId }) {
       const active = activeSwitches.get(threadId);
-      const terminalId = activeLoginTerminals.get(threadId);
+      const terminalId = active?.loginTerminal?.id;
       if (
         !active ||
         active.id !== operationId ||
@@ -265,7 +266,7 @@ export default async function plugin(bb: BbPluginApi) {
       ) {
         throw new Error("Claude login is not waiting for an authorization code.");
       }
-      activeLoginTerminals.delete(threadId);
+      active.loginTerminal = undefined;
       await bb.sdk.terminals.input({
         dataBase64: Buffer.from(`${code}\n`, "utf8").toString("base64"),
         terminalId,
@@ -375,7 +376,7 @@ export default async function plugin(bb: BbPluginApi) {
                     targetThreadId,
                     {
                       onInputReady: (terminalId) => {
-                        activeLoginTerminals.set(targetThreadId, terminalId);
+                        active.loginTerminal = { hostId, id: terminalId };
                       },
                       onSuccess,
                       signal,
@@ -439,7 +440,11 @@ export default async function plugin(bb: BbPluginApi) {
             ),
           );
         } catch (error) {
-          rejectResult(error);
+          if (controller.signal.aborted && active.phase !== "committed") {
+            resolveResult({ outcome: "cancelled" });
+          } else {
+            rejectResult(error);
+          }
         } finally {
           if (activeSwitches.get(threadId) === active) {
             activeSwitches.delete(threadId);
@@ -470,7 +475,6 @@ export default async function plugin(bb: BbPluginApi) {
     );
     await persistUncleanTerminals();
     activeTerminals.clear();
-    activeLoginTerminals.clear();
     cleanupReconciliations.clear();
     hostLocks.clear();
     activeSwitches.clear();

@@ -6,7 +6,7 @@
 2. A failed turn must never be retried automatically; the next message starts after runtime release.
 3. Credentials, raw auth output, and account identity must never enter the plugin RPC surface or be stored or logged. A one-time authorization code may cross RPC only after terminal echo is disabled; it must be one bounded printable line and never be stored or logged.
 4. Cancellation must be truthful before and after successful machine-wide login.
-5. Account-changing login must delegate browser handling to Claude Code without creating a browser profile or overriding `BROWSER`.
+5. Account-changing login must follow the `BROWSER` adapter contract in `CLAUDE.md`: one atomic Chrome Incognito launch, no browser profile, and no email collection.
 6. Visible workflow changes need focused component tests and an installed-plugin smoke.
 7. A release must include its built `dist/` bundle and pass package dry-run inspection.
 

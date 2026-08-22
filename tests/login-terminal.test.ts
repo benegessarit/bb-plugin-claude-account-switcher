@@ -99,6 +99,44 @@ test("the Incognito launcher invokes one browser executable without a profile ov
   }
 });
 
+test("the Incognito launcher opens Chrome only once when Claude invokes it repeatedly", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-once-"));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
+    const first = spawnSync(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
+      encoding: "utf8",
+      env,
+    });
+    const second = spawnSync(launcherPath, ["https://claude.ai/oauth/authorize"], {
+      encoding: "utf8",
+      env,
+    });
+
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      "https://claude.com/cai/oauth/authorize",
+    ]);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
 test("the Incognito launcher rejects non-HTTPS browser targets", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-url-"));
   const fakeBrowser = join(fixtureRoot, "chrome");

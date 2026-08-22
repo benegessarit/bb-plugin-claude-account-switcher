@@ -22,8 +22,10 @@ const readyNextMessage = z
 const loginChangedNotRebound = z
   .object({ outcome: z.literal("login-changed-not-rebound") })
   .strict();
+const cancelled = z.object({ outcome: z.literal("cancelled") }).strict();
 const notRunning = z.object({ outcome: z.literal("not-running") }).strict();
 const switchResult = z.discriminatedUnion("outcome", [
+  cancelled,
   readyNextMessage,
   loginChangedNotRebound,
 ]);
@@ -31,6 +33,7 @@ export const rpcContract = defineRpcContract({
   attachSwitch: {
     input: operationInput,
     output: z.discriminatedUnion("outcome", [
+      cancelled,
       readyNextMessage,
       loginChangedNotRebound,
       notRunning,

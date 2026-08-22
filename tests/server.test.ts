@@ -893,7 +893,7 @@ test("current-login cancellation settles before releasing the runtime", async ()
     });
 
     assert.deepEqual(cancelled, { outcome: "cancelled-before-release" });
-    await assert.rejects(switching, /subscription login could not be verified/);
+    assert.deepEqual(await switching, { outcome: "cancelled" });
     assert.equal(host.harness.inspection.sdk.callsTo("threads.stop").length, 0);
   } finally {
     await switching.catch(() => undefined);
@@ -1102,7 +1102,7 @@ test("plugin disposal cancels and closes an active login helper", async () => {
 
   await host.harness.lifecycle.dispose();
 
-  await assert.rejects(switching, /cancelled/);
+  assert.deepEqual(await switching, { outcome: "cancelled" });
   assert.deepEqual(host.harness.inspection.sdk.callsTo("terminals.close"), [
     [{ mode: "force", terminalId: "login_terminal" }],
   ]);
@@ -1317,7 +1317,7 @@ test("a later switch reconciles failed login cleanup before it can start", async
     operationId: DEFAULT_OPERATION_ID,
     threadId: "thread_2",
   });
-  await assert.rejects(secondSwitch, /cancelled/);
+  assert.deepEqual(await secondSwitch, { outcome: "cancelled" });
   await host.harness.lifecycle.dispose();
   assert.equal(closeAttemptsAtSecondStart, 2);
 });
