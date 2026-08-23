@@ -33,7 +33,7 @@
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
     "prepack": "npm run build",
-    "test": "bb plugin build && node --test --test-timeout=15000 tests/*.test.ts && vitest run tests/app.test.tsx",
+    "test": "bb plugin build && node --test --test-timeout=15000 tests/*.test.ts && vitest run tests/app.test.tsx tests/app-bundle.test.tsx",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -379,8 +379,12 @@ export async function runClaudeAuthStatus(
     }
   } finally {
     try {
-      await client.close(terminal.id, "force");
-      await client.onSettled?.(terminal.id);
+      const closed = await client.close(terminal.id, "force");
+      if (closed.status === "exited") {
+        await client.onSettled?.(terminal.id);
+      } else {
+        await client.onCleanupFailed?.(terminal.id, terminal.hostId);
+      }
     } catch {
       // Best-effort cleanup must not hide the auth classification result. A
       // failed close stays owned so plugin disposal can retry it.

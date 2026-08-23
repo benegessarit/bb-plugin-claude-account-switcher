@@ -7,8 +7,10 @@
 3. Credentials, raw auth output, and account identity must never enter the plugin RPC surface or be stored or logged. A one-time authorization code may cross RPC only after terminal echo is disabled; it must be one bounded printable line, one terminal-input call may be in flight, a reported delivery failure may be retried on the same operation, and the code must never be stored or logged.
 4. Cancellation must be truthful before and after successful machine-wide login.
 5. Account-changing login must follow the `BROWSER` adapter contract in `CLAUDE.md`: at most one Chrome invocation per operation, normal-cookie isolation without a profile override, no OS-window guarantee, and no email collection.
-6. Visible workflow changes need focused component tests. Activation review needs an installed-plugin smoke; source tests are not installed proof.
-7. A release must include its built `dist/` bundle and pass package dry-run inspection.
+6. A helper-terminal record may be removed only after BB reports `exited`. Disconnection, a thrown close, or a newer plugin generation must retain or recover durable ownership.
+7. Admission, cancellation, code input, attachment, and completion must target one exact operation. A remount must not create a second operation or report completion twice.
+8. Visible workflow changes need focused component tests. The generated app bundle must also activate through BB's shared-runtime seam; source tests alone are not package proof.
+9. A release must include its built `dist/` bundle and pass package dry-run inspection.
 
 ## Product boundary
 

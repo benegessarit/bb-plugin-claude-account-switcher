@@ -29,6 +29,12 @@ const switchResult = z.discriminatedUnion("outcome", [
   readyNextMessage,
   loginChangedNotRebound,
 ]);
+const switchCompletion = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("result"), result: switchResult }).strict(),
+  z
+    .object({ kind: z.literal("error"), message: z.string().min(1).max(1_000) })
+    .strict(),
+]);
 export const rpcContract = defineRpcContract({
   attachSwitch: {
     input: operationInput,
@@ -37,6 +43,32 @@ export const rpcContract = defineRpcContract({
       readyNextMessage,
       loginChangedNotRebound,
       notRunning,
+    ]),
+  },
+  beginSwitch: {
+    input: switchInput,
+    output: z.discriminatedUnion("outcome", [
+      z.object({ outcome: z.literal("accepted") }).strict(),
+      z
+        .object({
+          mode: z.enum(["current", "login"]),
+          operationId: z.string().uuid(),
+          outcome: z.literal("thread-busy"),
+        })
+        .strict(),
+      z.object({ outcome: z.literal("host-busy") }).strict(),
+      z
+        .object({
+          outcome: z.literal("thread-not-ready"),
+          reason: z.enum([
+            "machine-unavailable",
+            "not-claude",
+            "thread-not-idle",
+            "thread-not-ready",
+          ]),
+        })
+        .strict(),
+      cancelled,
     ]),
   },
   cancelSwitch: {
@@ -66,7 +98,16 @@ export const rpcContract = defineRpcContract({
           mode: z.enum(["current", "login"]),
           operationId: z.string().uuid(),
           phase: z.enum(["cancellable", "cancelling", "committed"]),
+          step: z.enum(["admitting", "cleanup", "login", "verification", "release"]),
           status: z.literal("running"),
+        })
+        .strict(),
+      z
+        .object({
+          completion: switchCompletion,
+          mode: z.enum(["current", "login"]),
+          operationId: z.string().uuid(),
+          status: z.literal("finished"),
         })
         .strict(),
     ]),
@@ -74,9 +115,5 @@ export const rpcContract = defineRpcContract({
   submitLoginCode: {
     input: loginCodeInput,
     output: z.object({ submitted: z.literal(true) }).strict(),
-  },
-  switchAccount: {
-    input: switchInput,
-    output: switchResult,
   },
 });

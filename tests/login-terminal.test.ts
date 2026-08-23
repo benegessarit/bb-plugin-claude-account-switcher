@@ -83,7 +83,9 @@ test("the Incognito launcher invokes one browser executable without a profile ov
   try {
     await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
     await chmod(launcherPath, 0o700);
-    const result = spawnSync(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
+    const oauthUrl =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=client%2Bid&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=state%2Bvalue#callback";
+    const result = spawnSync(launcherPath, [oauthUrl], {
       encoding: "utf8",
       env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
     });
@@ -92,41 +94,64 @@ test("the Incognito launcher invokes one browser executable without a profile ov
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
-      "https://claude.com/cai/oauth/authorize",
+      oauthUrl,
     ]);
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
   }
 });
 
-test("the Incognito launcher invokes a browser at most once for repeated callbacks", async () => {
+test("concurrent Incognito callbacks invoke the browser at most once", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-once-"));
   const fakeBrowser = join(fixtureRoot, "chrome");
   const browserArgs = join(fixtureRoot, "browser-args");
+  const browserStarted = join(fixtureRoot, "browser-started");
+  const releaseBrowser = join(fixtureRoot, "release-browser");
   const launcherPath = join(fixtureRoot, "open-chrome-incognito");
   await writeFile(
     fakeBrowser,
-    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"'].join(
-      "\n",
-    ),
+    [
+      "#!/bin/sh",
+      '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"',
+      ': > "$BB_SWITCH_BROWSER_STARTED"',
+      'while test ! -f "$BB_SWITCH_BROWSER_RELEASE"; do /bin/sleep 0.01; done',
+    ].join("\n"),
   );
   await chmod(fakeBrowser, 0o755);
 
   try {
     await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
     await chmod(launcherPath, 0o700);
-    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
-    const first = spawnSync(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
-      encoding: "utf8",
+    const env = {
+      ...process.env,
+      BB_SWITCH_BROWSER_ARGS: browserArgs,
+      BB_SWITCH_BROWSER_RELEASE: releaseBrowser,
+      BB_SWITCH_BROWSER_STARTED: browserStarted,
+    };
+    const first = spawn(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
       env,
+      stdio: "ignore",
     });
+    const firstExit = new Promise<number | null>((resolve) => {
+      first.once("exit", resolve);
+    });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        await access(browserStarted);
+        break;
+      } catch {
+        if (attempt === 99) throw new Error("Fake browser did not start.");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
     const second = spawnSync(launcherPath, ["https://claude.ai/oauth/authorize"], {
       encoding: "utf8",
       env,
     });
 
-    assert.equal(first.status, 0, first.stderr);
     assert.equal(second.status, 0, second.stderr);
+    await writeFile(releaseBrowser, "release\n");
+    assert.equal(await firstExit, 0);
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
@@ -733,38 +758,75 @@ test("already-cancelled auth verification creates no helper terminal", async () 
   assert.equal(creates, 0);
 });
 
+test("auth verification keeps a disconnected helper owned", async () => {
+  let cleanupFailed = false;
+  let settled = false;
+  const result = await runClaudeAuthStatus(
+    {
+      close: async () => terminal("disconnected"),
+      create: async () => terminal("running"),
+      get: async () => terminal("running"),
+      onCleanupFailed: () => {
+        cleanupFailed = true;
+      },
+      onSettled: () => {
+        settled = true;
+      },
+      output: async () =>
+        "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n",
+    },
+    "thread_1",
+  );
+
+  assert.deepEqual(result, {
+    apiProvider: "firstParty",
+    authMethod: "claude.ai",
+    loggedIn: true,
+  });
+  assert.equal(cleanupFailed, true);
+  assert.equal(settled, false);
+});
+
 test("cancellation wakes a pending poll without waiting for its timer", async () => {
   const closes: Array<"force" | "if-clean"> = [];
   const controller = new AbortController();
+  let closeStarted!: () => void;
   let pollStarted!: () => void;
   let releasePoll!: () => void;
+  const closing = new Promise<void>((resolve) => {
+    closeStarted = resolve;
+  });
   const started = new Promise<void>((resolve) => {
     pollStarted = resolve;
   });
   const blockedPoll = new Promise<void>((resolve) => {
     releasePoll = resolve;
   });
-  const running = runClaudeLogin(client([terminal("running")], closes), "thread_1", {
-    signal: controller.signal,
-    sleep: async () => {
-      pollStarted();
-      await blockedPoll;
+  const running = runClaudeLogin(
+    {
+      close: async (_terminalId, mode) => {
+        closes.push(mode);
+        closeStarted();
+        return terminal("exited", 1);
+      },
+      create: async () => terminal("running"),
+      get: async () => terminal("running"),
     },
-  });
+    "thread_1",
+    {
+      signal: controller.signal,
+      sleep: async () => {
+        pollStarted();
+        await blockedPoll;
+      },
+    },
+  );
   await started;
 
   controller.abort();
-  const outcome = await Promise.race([
-    running.catch((error: unknown) => error),
-    new Promise<"still waiting">((resolve) => {
-      setTimeout(() => resolve("still waiting"), 25);
-    }),
-  ]);
-
+  await closing;
   releasePoll();
-  await running.catch(() => undefined);
-  assert.notEqual(outcome, "still waiting");
-  assert.match(String(outcome), /cancelled/);
+  await assert.rejects(running, /cancelled/);
   assert.deepEqual(closes, ["force"]);
 });
 

@@ -43,6 +43,11 @@ Disable or remove it with `bb plugin disable claude-account-switcher` or `bb plu
 
 BB asks Chrome at most once for each switch and waits for Claude Code to finish. Chrome decides whether that request creates a new OS window or reuses its running process. Reaching Claude's home screen without a successful CLI completion does not complete the switch.
 
+The switch itself is server-owned. Closing and reopening the BB surface reattaches
+to the same operation, including its current cleanup, login, verification, or
+release step. Closing the dialog explicitly requests cancellation; navigating
+away does not.
+
 ## Security and limits
 
 - BB plugins run with the user's BB privileges. This plugin can launch a host terminal command and stop the selected BB thread runtime. Install it only from a publisher you trust.
@@ -57,7 +62,7 @@ BB asks Chrome at most once for each switch and waits for Claude Code to finish.
   echo is disabled; it is bounded to one printable line, never stored or logged,
   and only one terminal-input call can be in flight. A failed call leaves the same
   operation available for a deliberate retry.
-- A per-machine lock prevents overlapping login changes. If BB cannot stop a helper terminal, later switches on that machine remain blocked until cleanup succeeds.
+- Exact per-machine leases prevent overlapping login changes. Every helper terminal is recorded before BB observes it. A helper leaves that durable ledger only after BB reports it exited. If cleanup cannot be proved, the record survives plugin reload and later switches on that machine remain blocked.
 - Claude login is machine-wide, not session-specific. Other already-loaded Claude sessions keep their current runtime until each one is released or restarted.
 - BB cannot atomically combine the plugin's final idle check with runtime release. A message arriving in that small window can race the release. The plugin refuses every active, starting, or stopping state it can observe.
 - The plugin never retries a failed turn automatically.
@@ -70,9 +75,13 @@ npm run format:check
 npm run typecheck
 npm test
 npm run build
+bb plugin types --check .
+npm pack --dry-run
 ```
 
-`dist/` is generated and ignored by Git. `npm pack` rebuilds it and includes only the distributable bundle declared by `package.json`.
+`npm test` activates both the source app and the generated app bundle. `dist/` is
+generated and ignored by Git. `npm pack` rebuilds it and includes only the
+distributable bundle declared by `package.json`.
 
 Reload a locally installed checkout after successful checks:
 

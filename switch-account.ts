@@ -1,33 +1,52 @@
 const CLAUDE_PROVIDER_ID = "claude-code";
 
+export type SwitchStep = "admitting" | "cleanup" | "login" | "verification" | "release";
+
+export type SwitchAdmissionReason =
+  | "host-busy"
+  | "machine-unavailable"
+  | "not-claude"
+  | "thread-not-idle"
+  | "thread-not-ready";
+
+export class SwitchAdmissionError extends Error {
+  readonly reason: SwitchAdmissionReason;
+
+  constructor(reason: SwitchAdmissionReason, message: string) {
+    super(message);
+    this.name = "SwitchAdmissionError";
+    this.reason = reason;
+  }
+}
+
 export interface HostLockRegistry {
-  add(hostId: string): unknown;
-  delete(hostId: string): unknown;
   has(hostId: string): boolean;
+  release(hostId: string, owner: object): boolean;
+  reserve(hostId: string, owner: object): void;
 }
 
 export class HostReservations implements HostLockRegistry {
-  readonly #counts = new Map<string, number>();
+  readonly #owners = new Map<string, Set<object>>();
 
-  add(hostId: string): this {
-    this.#counts.set(hostId, (this.#counts.get(hostId) ?? 0) + 1);
-    return this;
+  reserve(hostId: string, owner: object): void {
+    const owners = this.#owners.get(hostId) ?? new Set<object>();
+    owners.add(owner);
+    this.#owners.set(hostId, owners);
   }
 
   clear(): void {
-    this.#counts.clear();
+    this.#owners.clear();
   }
 
-  delete(hostId: string): boolean {
-    const count = this.#counts.get(hostId);
-    if (count === undefined) return false;
-    if (count === 1) this.#counts.delete(hostId);
-    else this.#counts.set(hostId, count - 1);
+  release(hostId: string, owner: object): boolean {
+    const owners = this.#owners.get(hostId);
+    if (!owners?.delete(owner)) return false;
+    if (owners.size === 0) this.#owners.delete(hostId);
     return true;
   }
 
   has(hostId: string): boolean {
-    return this.#counts.has(hostId);
+    return this.#owners.has(hostId);
   }
 }
 
@@ -60,7 +79,9 @@ export interface AccountSwitchRequest {
 }
 
 export interface AccountSwitchLifecycle {
-  markCommitted(): void;
+  markAdmitted?(hostId: string): void;
+  markCommitted?(): void;
+  setStep?(step: SwitchStep): void;
 }
 
 interface SessionAction {
@@ -74,11 +95,17 @@ async function classifySession(
 ): Promise<SessionAction> {
   const thread = await dependencies.getThread(threadId, signal);
   if (thread.providerId !== CLAUDE_PROVIDER_ID) {
-    throw new Error("This button only works in Claude Code sessions.");
+    throw new SwitchAdmissionError(
+      "not-claude",
+      "This button only works in Claude Code sessions.",
+    );
   }
   const hostId = thread.environment?.hostId;
   if (!hostId) {
-    throw new Error("BB could not identify this session's machine.");
+    throw new SwitchAdmissionError(
+      "machine-unavailable",
+      "BB could not identify this session's machine.",
+    );
   }
   if (thread.status === "idle" || thread.status === "error") return { hostId };
   if (
@@ -86,11 +113,15 @@ async function classifySession(
     thread.status === "starting" ||
     thread.status === "stopping"
   ) {
-    throw new Error(
+    throw new SwitchAdmissionError(
+      "thread-not-idle",
       "Wait for this session to become idle before switching its Claude login.",
     );
   }
-  throw new Error("This session is not ready to rebind.");
+  throw new SwitchAdmissionError(
+    "thread-not-ready",
+    "This session is not ready to rebind.",
+  );
 }
 
 function throwIfCancelled(signal: AbortSignal): void {
@@ -104,7 +135,7 @@ export async function switchClaudeAccount(
   request: AccountSwitchRequest,
   hostLocks: HostLockRegistry,
   signal: AbortSignal,
-  lifecycle: AccountSwitchLifecycle = { markCommitted: () => undefined },
+  lifecycle: AccountSwitchLifecycle = {},
 ): Promise<
   { outcome: "ready-next-message" } | { outcome: "login-changed-not-rebound" }
 > {
@@ -112,19 +143,26 @@ export async function switchClaudeAccount(
   const initial = await classifySession(dependencies, request.threadId, signal);
   throwIfCancelled(signal);
   if (hostLocks.has(initial.hostId)) {
-    throw new Error("A Claude account switch is already open on this machine.");
+    throw new SwitchAdmissionError(
+      "host-busy",
+      "A Claude account switch is already open on this machine.",
+    );
   }
 
-  hostLocks.add(initial.hostId);
+  const hostLease = {};
+  hostLocks.reserve(initial.hostId, hostLease);
+  lifecycle.markAdmitted?.(initial.hostId);
   try {
+    lifecycle.setStep?.("cleanup");
     await dependencies.reconcileCleanup(initial.hostId, signal);
     throwIfCancelled(signal);
     if (request.mode === "login") {
+      lifecycle.setStep?.("login");
       let loginCommitted = false;
       try {
         await dependencies.login(request.threadId, initial.hostId, signal, () => {
           loginCommitted = true;
-          lifecycle.markCommitted();
+          lifecycle.markCommitted?.();
         });
       } catch (error) {
         if (loginCommitted) return { outcome: "login-changed-not-rebound" };
@@ -133,6 +171,7 @@ export async function switchClaudeAccount(
     }
 
     try {
+      lifecycle.setStep?.("verification");
       await dependencies.verifySubscription(request.threadId, initial.hostId, signal);
     } catch (error) {
       if (request.mode === "login") {
@@ -142,6 +181,7 @@ export async function switchClaudeAccount(
     }
 
     if (request.mode === "current") throwIfCancelled(signal);
+    lifecycle.setStep?.("release");
     let current: SessionAction;
     try {
       current = await classifySession(dependencies, request.threadId, signal);
@@ -160,7 +200,7 @@ export async function switchClaudeAccount(
 
     if (request.mode === "current") {
       throwIfCancelled(signal);
-      lifecycle.markCommitted();
+      lifecycle.markCommitted?.();
     }
     try {
       await dependencies.stopThread(request.threadId);
@@ -174,6 +214,6 @@ export async function switchClaudeAccount(
 
     return { outcome: "ready-next-message" };
   } finally {
-    hostLocks.delete(initial.hostId);
+    hostLocks.release(initial.hostId, hostLease);
   }
 }

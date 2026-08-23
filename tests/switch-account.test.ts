@@ -7,17 +7,22 @@ import {
   type ThreadSnapshot,
 } from "../switch-account.ts";
 
-test("host reservations remain locked until every owner releases", () => {
+test("host reservations release only the exact owner's lease", () => {
   const reservations = new HostReservations();
+  const firstOwner = {};
+  const secondOwner = {};
 
-  reservations.add("host_1");
-  reservations.add("host_1");
+  reservations.reserve("host_1", firstOwner);
+  reservations.reserve("host_1", secondOwner);
   assert.equal(reservations.has("host_1"), true);
 
-  reservations.delete("host_1");
+  assert.equal(reservations.release("host_1", {}), false);
   assert.equal(reservations.has("host_1"), true);
 
-  reservations.delete("host_1");
+  assert.equal(reservations.release("host_1", firstOwner), true);
+  assert.equal(reservations.has("host_1"), true);
+
+  assert.equal(reservations.release("host_1", secondOwner), true);
   assert.equal(reservations.has("host_1"), false);
 });
 
@@ -65,7 +70,7 @@ test("an idle session uses the current login without opening OAuth", async () =>
   const result = await switchClaudeAccount(
     dependencies(events),
     { mode: "current", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     signal(),
   );
 
@@ -73,9 +78,38 @@ test("an idle session uses the current login without opening OAuth", async () =>
   assert.deepEqual(events, ["thread", "auth", "thread", "stop"]);
 });
 
+test("admission and progress are reported from the host-owned state machine", async () => {
+  const events: string[] = [];
+
+  const result = await switchClaudeAccount(
+    dependencies(events),
+    { mode: "current", threadId: "thread_1" },
+    new HostReservations(),
+    signal(),
+    {
+      markAdmitted: (hostId: string) => events.push(`admitted:${hostId}`),
+      markCommitted: () => events.push("committed"),
+      setStep: (step: string) => events.push(`step:${step}`),
+    },
+  );
+
+  assert.deepEqual(result, { outcome: "ready-next-message" });
+  assert.deepEqual(events, [
+    "thread",
+    "admitted:host_1",
+    "step:cleanup",
+    "step:verification",
+    "auth",
+    "step:release",
+    "thread",
+    "committed",
+    "stop",
+  ]);
+});
+
 test("failed-helper reconciliation holds the machine lock", async () => {
   const events: string[] = [];
-  const hostLocks = new Set<string>();
+  const hostLocks = new HostReservations();
   let releaseCleanup!: () => void;
   const cleanup = new Promise<void>((resolve) => {
     releaseCleanup = resolve;
@@ -100,7 +134,7 @@ test("failed-helper reconciliation holds the machine lock", async () => {
   assert.equal(hostLocks.has("host_1"), true);
   releaseCleanup();
   assert.deepEqual(await switching, { outcome: "ready-next-message" });
-  assert.equal(hostLocks.size, 0);
+  assert.equal(hostLocks.has("host_1"), false);
 });
 
 test("cancellation during cleanup reconciliation launches no helper", async () => {
@@ -123,7 +157,7 @@ test("cancellation during cleanup reconciliation launches no helper", async () =
       },
     }),
     { mode: "login", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     controller.signal,
   );
   await started;
@@ -146,7 +180,7 @@ test("an errored session releases the runtime for the next message", async () =>
   const result = await switchClaudeAccount(
     deps,
     { mode: "current", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     signal(),
   );
 
@@ -168,7 +202,7 @@ for (const status of ["active", "starting", "stopping"] as const) {
       switchClaudeAccount(
         deps,
         { mode: "login", threadId: "thread_1" },
-        new Set(),
+        new HostReservations(),
         signal(),
       ),
       /become idle/,
@@ -176,6 +210,26 @@ for (const status of ["active", "starting", "stopping"] as const) {
     assert.deepEqual(events, ["thread"]);
   });
 }
+
+test("thread readiness failures expose a typed admission reason", async () => {
+  const events: string[] = [];
+  const deps = dependencies(events, {
+    getThread: async () => thread("active"),
+  });
+
+  await assert.rejects(
+    switchClaudeAccount(
+      deps,
+      { mode: "login", threadId: "thread_1" },
+      new HostReservations(),
+      signal(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { readonly reason?: string }).reason, "thread-not-idle");
+      return true;
+    },
+  );
+});
 
 test("a completed login with failed auth proof does not release the session", async () => {
   const events: string[] = [];
@@ -189,7 +243,7 @@ test("a completed login with failed auth proof does not release the session", as
   const result = await switchClaudeAccount(
     deps,
     { mode: "login", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     signal(),
     { markCommitted: () => events.push("committed") },
   );
@@ -211,7 +265,7 @@ test("a cleanup error after login success reports changed login without release"
   const result = await switchClaudeAccount(
     deps,
     { mode: "login", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     signal(),
     { markCommitted: () => events.push("committed") },
   );
@@ -234,7 +288,7 @@ test("cancellation before the current-login commit leaves the runtime untouched"
     switchClaudeAccount(
       deps,
       { mode: "current", threadId: "thread_1" },
-      new Set(),
+      new HostReservations(),
       controller.signal,
     ),
     /cancelled/,
@@ -256,7 +310,7 @@ test("login success commits before auth verification and ignores a late cancel",
   const result = await switchClaudeAccount(
     deps,
     { mode: "login", threadId: "thread_1" },
-    new Set(),
+    new HostReservations(),
     controller.signal,
     { markCommitted: () => events.push("committed") },
   );
@@ -282,7 +336,7 @@ test("a second switch on the same machine is refused", async () => {
       await authGate;
     },
   });
-  const locks = new Set<string>();
+  const locks = new HostReservations();
   const first = switchClaudeAccount(
     deps,
     { mode: "current", threadId: "thread_1" },
@@ -302,7 +356,7 @@ test("a second switch on the same machine is refused", async () => {
   );
   releaseAuth();
   await first;
-  assert.equal(locks.size, 0);
+  assert.equal(locks.has("host_1"), false);
 });
 
 test("non-Claude and missing-host sessions fail before login", async () => {
@@ -319,7 +373,7 @@ test("non-Claude and missing-host sessions fail before login", async () => {
       switchClaudeAccount(
         deps,
         { mode: "login", threadId: "thread_1" },
-        new Set(),
+        new HostReservations(),
         signal(),
       ),
     );
