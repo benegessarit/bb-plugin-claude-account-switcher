@@ -329,9 +329,10 @@ export default async function plugin(bb: BbPluginApi) {
     signal: AbortSignal,
   ): Promise<string> {
     const status = await bb.sdk.hosts.providerCliStatus({ hostId, signal });
-    const executablePath = status.claudeCode.executablePath;
+    const claudeStatus = status["claude-code"];
+    const executablePath = claudeStatus?.executablePath;
     if (
-      !status.claudeCode.installed ||
+      !claudeStatus?.installed ||
       !executablePath ||
       !executablePath.startsWith("/")
     ) {

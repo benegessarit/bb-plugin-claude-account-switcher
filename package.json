@@ -13,7 +13,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.38",
-    "bbPluginSdk": ">=0.4.8"
+    "bbPluginSdk": ">=0.4.11"
   },
   "os": [
     "darwin",
@@ -47,7 +47,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.8",
+    "@get-bb/plugin-sdk": "0.4.11",
     "@radix-ui/react-dialog": "^1.1.19",
     "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.12",

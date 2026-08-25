@@ -18,7 +18,7 @@ type InspectedSwitch =
     };
 
 const providerCliStatus = {
-  claudeCode: {
+  "claude-code": {
     currentVersion: "2.1.235",
     displayName: "Claude Code",
     executableName: "claude",
@@ -48,7 +48,7 @@ const providerCliStatus = {
     npmPackageName: null,
     versionUnsupported: false,
   },
-  cursor: {
+  "acp-cursor": {
     currentVersion: null,
     displayName: "Cursor",
     executableName: "cursor-agent",
