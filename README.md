@@ -5,7 +5,8 @@ Switch the machine-wide Claude subscription used by one BB Claude Code session w
 The session header button has two paths:
 
 - **Use current login** verifies the Claude login already active on the session's machine, then asks BB to release the selected session's loaded runtime.
-- **Sign in to another account** starts Claude Code's standard subscription login and asks Chrome at most once to handle its browser URL in Incognito. Normal-window cookies are not used, but already-open Incognito windows share one session. Chrome may offer passwords from the active profile; BB never reads or copies them.
+- **Sign in to another account** starts Claude Code's standard subscription login and makes one automatic Chrome Incognito handoff. Normal-window cookies are not used, but already-open Incognito windows share one session. Chrome may offer passwords from the active profile; BB never reads or copies them.
+- **Return to authorization** appears while Claude Code is waiting for the browser. If Claude's account switch sends you to its home page, this reopens the exact pending consent page in the same Incognito session without restarting the BB switch.
 
 ## Requirements
 
@@ -35,13 +36,14 @@ Disable or remove it with `bb plugin disable claude-account-switcher` or `bb plu
 1. Wait until the Claude Code session is idle or in an error state.
 2. Select **Switch Claude login** in that session's header.
 3. Reuse the current machine login or sign in on Claude's website.
-4. Leave the BB dialog open until Claude Code confirms the login. If Claude shows
-   a one-time code instead of completing the browser callback, expand **Claude
-   showed a code?** and submit it. BB blocks overlapping submissions and keeps
-   the same operation retryable if terminal delivery reports a failure.
+4. Leave the BB dialog open until Claude Code confirms the login. If switching
+   accounts lands on Claude's home page, leave that Incognito window open and
+   select **Return to authorization** in BB. If Claude shows a one-time code
+   instead, expand **Claude showed a code?** and submit it. BB blocks overlapping
+   actions and keeps the same operation retryable when safe.
 5. Send the next message in the same thread.
 
-BB asks Chrome at most once for each switch and waits for Claude Code to finish. Chrome decides whether that request creates a new OS window or reuses its running process. Reaching Claude's home screen without a successful CLI completion does not complete the switch.
+BB makes one automatic browser handoff for each switch. **Return to authorization** can deliberately reopen the same pending consent URL without starting a second Claude login. Chrome decides whether a handoff creates a new OS window or reuses its running process. Reaching Claude's home page without a successful CLI completion does not complete the switch.
 
 The switch itself is server-owned. Closing and reopening the BB surface reattaches
 to the same operation, including its current cleanup, login, verification, or
@@ -52,7 +54,8 @@ away does not.
 
 - BB plugins run with the user's BB privileges. This plugin can launch a host terminal command and stop the selected BB thread runtime. Install it only from a publisher you trust.
 - The plugin never reads Claude credential files or macOS Keychain.
-- The plugin gives Claude Code a short-lived browser launcher that invokes Chrome with `--incognito --new-window`. An operation-local atomic claim lets at most the first HTTPS callback invoke Chrome; later callbacks exit successfully. It invokes the existing Chrome executable directly, without `open -n` or a temporary `--user-data-dir`. This excludes normal-window cookies, not the session shared by already-open Incognito windows. Password availability is controlled by Chrome's active profile, settings, and policy. The plugin never reads or copies passwords. The launcher and claim are removed after normal completion or graceful cancellation.
+- The plugin gives Claude Code a short-lived browser launcher that invokes Chrome with `--incognito --new-window`. An operation-local atomic claim lets only the first automatic callback invoke Chrome; later automatic callbacks exit successfully. The launcher accepts only Claude's exact HTTPS consent route with the required OAuth fields, then keeps the exact URL in a mode-`0600` operation-local temporary file so an explicit **Return to authorization** can reopen it. The URL never enters the plugin frontend, RPC payloads, BB storage, or logs.
+- The launcher invokes the existing Chrome executable directly, without `open -n` or a temporary `--user-data-dir`. This excludes normal-window cookies, not the session shared by already-open Incognito windows. Password availability is controlled by Chrome's active profile, settings, and policy. The plugin never reads or copies passwords. Normal completion and graceful cancellation remove the launcher, URL, and claim. A machine or terminal `SIGKILL` can leave that owner-only temporary directory for the operating system's temporary-file cleanup.
 - The plugin uses the exact Claude Code executable reported by BB for the session's machine. It does not select Claude from the terminal's `PATH`.
 - The small auth-status filtering helper uses `node` from the session machine's
   `PATH`. Treat that host `PATH` as part of the plugin's trust boundary.

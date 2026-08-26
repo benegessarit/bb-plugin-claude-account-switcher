@@ -56,6 +56,7 @@ test("active switch inspection has one server-authoritative shape", () => {
   assert.equal(inspectSwitch?.output.safeParse({ status: "none" }).success, true);
   assert.equal(
     inspectSwitch?.output.safeParse({
+      canReturnToAuthorization: true,
       codeReady: true,
       mode: "login",
       operationId: "a5a3434e-3728-4951-8c3f-a17ca2f5f234",
@@ -75,6 +76,24 @@ test("active switch inspection has one server-authoritative shape", () => {
       operationId: OPERATION_ID,
       status: "finished",
     }).success,
+    true,
+  );
+});
+
+test("authorization return is bound to one switch operation", () => {
+  assert.equal(
+    rpcContract.reopenAuthorization.input.safeParse({
+      operationId: OPERATION_ID,
+      threadId: "thread_1",
+    }).success,
+    true,
+  );
+  assert.equal(
+    rpcContract.reopenAuthorization.input.safeParse({ threadId: "thread_1" }).success,
+    false,
+  );
+  assert.equal(
+    rpcContract.reopenAuthorization.output.safeParse({ opened: true }).success,
     true,
   );
 });

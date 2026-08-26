@@ -40,6 +40,7 @@ const defaultRpc = {
   cancelSwitch: async () => ({ outcome: "not-running" as const }),
   inspectSwitch: async () => ({ status: "none" as const }),
   inspectThread: async () => ({ isClaude: true }),
+  reopenAuthorization: async () => ({ opened: true as const }),
   submitLoginCode: async () => ({ submitted: true as const }),
 };
 
@@ -210,7 +211,9 @@ test("a host-busy admission does not claim that login has started", async () => 
     expect((await slot.findByRole("alert")).textContent).toContain(
       "already open on this machine",
     );
-    expect(slot.queryByText(/BB asks Chrome at most once/i)).toBeNull();
+    expect(
+      slot.queryByText(/BB opens one automatic Chrome Incognito handoff/i),
+    ).toBeNull();
     expect(attachSwitch).not.toHaveBeenCalled();
   } finally {
     slot.lifecycle.unmount();
@@ -247,7 +250,9 @@ test("a thread-busy admission reattaches to the server's exact operation", async
         threadId: "thread_1",
       });
     });
-    expect(await slot.findByText(/BB asks Chrome at most once/i)).not.toBeNull();
+    expect(
+      await slot.findByText(/BB opens one automatic Chrome Incognito handoff/i),
+    ).not.toBeNull();
   } finally {
     finishSwitch({ outcome: "cancelled" });
     await switchResult;
@@ -268,6 +273,7 @@ test("same-mode thread-busy reattachment keeps polling the exact operation", asy
   const inspectSwitch = vi.fn(async () =>
     beginStarted
       ? {
+          canReturnToAuthorization: false,
           codeReady: true,
           mode: "login" as const,
           operationId: OTHER_OPERATION_ID,
@@ -350,9 +356,13 @@ test("the browser handoff states only what BB and Incognito control", async () =
       await slot.findByRole("button", { name: "Sign in to another account" }),
     );
     expect(await slot.findByText("Checking session…")).not.toBeNull();
-    expect(slot.queryByText(/BB asks Chrome at most once/i)).toBeNull();
+    expect(
+      slot.queryByText(/BB opens one automatic Chrome Incognito handoff/i),
+    ).toBeNull();
     acceptSwitch({ outcome: "accepted" });
-    expect(await slot.findByText(/BB asks Chrome at most once/i)).not.toBeNull();
+    expect(
+      await slot.findByText(/BB opens one automatic Chrome Incognito handoff/i),
+    ).not.toBeNull();
     expect(
       await slot.findByText(/does not use cookies from your normal windows/i),
     ).not.toBeNull();
@@ -370,6 +380,145 @@ test("the browser handoff states only what BB and Incognito control", async () =
     expect(slot.queryByText(/home screen/i)).toBeNull();
   } finally {
     finishSwitch({ outcome: "ready-next-message" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
+test("authorization return appears only when armed and reopens the same operation", async () => {
+  let operationActive = false;
+  let canReturnToAuthorization = false;
+  let finishSwitch!: (result: { outcome: "cancelled" }) => void;
+  const switchResult = new Promise<{ outcome: "cancelled" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  let finishReopen!: (result: { opened: true }) => void;
+  const reopenResult = new Promise<{ opened: true }>((resolve) => {
+    finishReopen = resolve;
+  });
+  const reopenAuthorization = vi.fn(async () => reopenResult);
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    beginSwitch: async () => {
+      operationActive = true;
+      return { outcome: "accepted" as const };
+    },
+    inspectSwitch: async () =>
+      operationActive
+        ? {
+            canReturnToAuthorization,
+            codeReady: true,
+            mode: "login" as const,
+            operationId: OPERATION_ID,
+            phase: "cancellable" as const,
+            status: "running" as const,
+            step: "login" as const,
+          }
+        : { status: "none" as const },
+    reopenAuthorization,
+  });
+
+  try {
+    fireEvent.click(
+      await slot.findByRole("button", {
+        name: "Switch Claude login for this session",
+      }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Sign in to another account" }),
+    );
+    expect(slot.queryByRole("button", { name: "Return to authorization" })).toBeNull();
+
+    canReturnToAuthorization = true;
+    const reopen = await slot.findByRole("button", {
+      name: "Return to authorization",
+    });
+    fireEvent.click(reopen);
+    expect(
+      (
+        await slot.findByRole("button", { name: "Opening authorization…" })
+      ).getAttribute("aria-busy"),
+    ).toBe("true");
+    expect(await slot.findByText(/keep that Incognito window open/i)).not.toBeNull();
+    expect(reopenAuthorization).toHaveBeenCalledWith({
+      operationId: OPERATION_ID,
+      threadId: "thread_1",
+    });
+
+    finishReopen({ opened: true });
+    expect(
+      await slot.findByRole("button", { name: "Return to authorization" }),
+    ).not.toBeNull();
+    expect(slot.queryByRole("alert")).toBeNull();
+  } finally {
+    finishReopen({ opened: true });
+    finishSwitch({ outcome: "cancelled" });
+    await switchResult;
+    slot.lifecycle.unmount();
+  }
+});
+
+test("authorization return failure stays inline and keeps keyboard retry focus", async () => {
+  let finishSwitch!: (result: { outcome: "cancelled" }) => void;
+  const switchResult = new Promise<{ outcome: "cancelled" }>((resolve) => {
+    finishSwitch = resolve;
+  });
+  let reopenRunning = false;
+  let sawUnavailableInspection = false;
+  let rejectReopen!: (reason: Error) => void;
+  const reopenResult = new Promise<{ opened: true }>((_resolve, reject) => {
+    rejectReopen = reject;
+  });
+  const slot = await renderAction({
+    ...defaultRpc,
+    attachSwitch: async () => switchResult,
+    inspectSwitch: async () => {
+      if (reopenRunning) sawUnavailableInspection = true;
+      return {
+        canReturnToAuthorization: !reopenRunning,
+        codeReady: !reopenRunning,
+        mode: "login" as const,
+        operationId: OPERATION_ID,
+        phase: "cancellable" as const,
+        status: "running" as const,
+        step: "login" as const,
+      };
+    },
+    reopenAuthorization: async () => {
+      reopenRunning = true;
+      return reopenResult;
+    },
+  });
+
+  try {
+    const reopen = await slot.findByRole("button", {
+      name: "Return to authorization",
+    });
+    reopen.focus();
+    fireEvent.click(reopen);
+    await waitFor(() => expect(sawUnavailableInspection).toBe(true));
+    expect(await slot.findByRole("button", { name: "Opening authorization…" })).toBe(
+      reopen,
+    );
+
+    reopenRunning = false;
+    rejectReopen(
+      new Error(
+        "Claude has not opened the authorization page yet. Wait a moment and try again.",
+      ),
+    );
+
+    expect((await slot.findByRole("alert")).textContent).toContain(
+      "Claude has not opened the authorization page yet",
+    );
+    expect(await slot.findByRole("button", { name: "Return to authorization" })).toBe(
+      reopen,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(reopen));
+    expect(toast.error).not.toHaveBeenCalled();
+  } finally {
+    finishSwitch({ outcome: "cancelled" });
     await switchResult;
     slot.lifecycle.unmount();
   }
@@ -443,6 +592,7 @@ test("unmounting during admission leaves the server operation recoverable", asyn
 
 test("a late mount inspection cannot attach the operation a second time", async () => {
   let resolveInspection!: (result: {
+    canReturnToAuthorization: boolean;
     codeReady: boolean;
     mode: "login";
     operationId: string;
@@ -451,6 +601,7 @@ test("a late mount inspection cannot attach the operation a second time", async 
     step: "login";
   }) => void;
   const inspection = new Promise<{
+    canReturnToAuthorization: boolean;
     codeReady: boolean;
     mode: "login";
     operationId: string;
@@ -483,6 +634,7 @@ test("a late mount inspection cannot attach the operation a second time", async 
     await waitFor(() => expect(attachSwitch).toHaveBeenCalledTimes(1));
 
     resolveInspection({
+      canReturnToAuthorization: false,
       codeReady: false,
       mode: "login",
       operationId: OPERATION_ID,
@@ -518,6 +670,7 @@ test("only the mounted attachment reports completion after a remount", async () 
     inspectSwitch: async () =>
       operationActive
         ? {
+            canReturnToAuthorization: false,
             codeReady: false,
             mode: "current" as const,
             operationId: OPERATION_ID,
@@ -563,6 +716,7 @@ test("a remounted pending code submission cannot submit a duplicate", async () =
     ...defaultRpc,
     attachSwitch: async () => switchResult,
     inspectSwitch: async () => ({
+      canReturnToAuthorization: false,
       codeReady: false,
       mode: "login" as const,
       operationId: OPERATION_ID,
@@ -603,6 +757,7 @@ test("a remounted action reattaches to the active server-side switch", async () 
     ...defaultRpc,
     attachSwitch: async () => switchResult,
     inspectSwitch: async () => ({
+      canReturnToAuthorization: false,
       codeReady: true,
       mode: "login" as const,
       operationId: OPERATION_ID,
@@ -698,6 +853,7 @@ test("a remounted action restores the server cancellation phase", async () => {
     attachSwitch: async () => switchResult,
     cancelSwitch,
     inspectSwitch: async () => ({
+      canReturnToAuthorization: false,
       codeReady: false,
       mode: "login" as const,
       operationId: OPERATION_ID,
@@ -734,6 +890,7 @@ test("a remounted action keeps tracking the phase after code input is ready", as
     inspectSwitch: async () => {
       inspections += 1;
       return {
+        canReturnToAuthorization: false,
         codeReady: true,
         mode: "login" as const,
         operationId: OPERATION_ID,
@@ -783,6 +940,7 @@ test("closing a committed switch keeps a later changed-login result visible", as
     inspectSwitch: async () =>
       operationActive
         ? {
+            canReturnToAuthorization: false,
             codeReady: false,
             mode: "login" as const,
             operationId: OPERATION_ID,
@@ -840,6 +998,7 @@ test("closing a committed switch keeps a later attachment error visible", async 
     inspectSwitch: async () =>
       operationActive
         ? {
+            canReturnToAuthorization: false,
             codeReady: false,
             mode: "current" as const,
             operationId: OPERATION_ID,
@@ -893,6 +1052,7 @@ test("reopening a committed switch restores inline failure feedback", async () =
     inspectSwitch: async () =>
       operationActive
         ? {
+            canReturnToAuthorization: false,
             codeReady: false,
             mode: "current" as const,
             operationId: OPERATION_ID,
@@ -948,6 +1108,7 @@ test("the authorization-code fallback is disclosed only while login waits", asyn
     inspectSwitch: async () =>
       loginStarted
         ? {
+            canReturnToAuthorization: false,
             codeReady: true,
             mode: "login" as const,
             operationId: OPERATION_ID,

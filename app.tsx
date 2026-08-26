@@ -87,6 +87,8 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
   const [switchOperationId, setSwitchOperationId] = useState<string | null>(null);
   const [switchPhase, setSwitchPhase] = useState<SwitchPhase | null>(null);
   const [switchStep, setSwitchStep] = useState<SwitchStep | null>(null);
+  const [canReturnToAuthorization, setCanReturnToAuthorization] = useState(false);
+  const [returningToAuthorization, setReturningToAuthorization] = useState(false);
   const [codeReady, setCodeReady] = useState(false);
   const [codeExpanded, setCodeExpanded] = useState(false);
   const [authorizationCode, setAuthorizationCode] = useState("");
@@ -98,6 +100,7 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
   const dialogDismissed = useRef(false);
   const cancelRequested = useRef(false);
   const cancellation = useRef<Promise<CancellationResult> | null>(null);
+  const authorizationReturnInFlight = useRef(false);
 
   useEffect(() => {
     isMounted.current = true;
@@ -168,6 +171,7 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
     mode: SwitchMode,
     operationId?: string,
     restored?: {
+      readonly canReturnToAuthorization: boolean;
       readonly codeReady: boolean;
       readonly phase: SwitchPhase;
       readonly step: SwitchStep;
@@ -183,6 +187,9 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
     setSwitchingMode(targetMode);
     setSwitchPhase(restored?.phase ?? "cancellable");
     setSwitchStep(restored?.step ?? "admitting");
+    setCanReturnToAuthorization(restored?.canReturnToAuthorization ?? false);
+    authorizationReturnInFlight.current = false;
+    setReturningToAuthorization(false);
     setCodeReady(restored?.codeReady ?? false);
     setCodeExpanded(false);
     setAuthorizationCode("");
@@ -248,6 +255,9 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
         setSwitchingMode(null);
         setSwitchPhase(null);
         setSwitchStep(null);
+        setCanReturnToAuthorization(false);
+        authorizationReturnInFlight.current = false;
+        setReturningToAuthorization(false);
         setCodeReady(false);
       }
     }
@@ -273,6 +283,7 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
         }
         setOpen(true);
         void runSwitch(active.mode, active.operationId, {
+          canReturnToAuthorization: active.canReturnToAuthorization,
           codeReady: active.codeReady,
           phase: active.phase,
           step: active.step,
@@ -302,6 +313,9 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
         }
         setSwitchPhase(active.phase);
         setSwitchStep(active.step);
+        if (!authorizationReturnInFlight.current) {
+          setCanReturnToAuthorization(active.canReturnToAuthorization);
+        }
         setCodeReady(active.codeReady);
         needsRefresh = true;
         refreshDelayMs = active.codeReady ? 500 : 250;
@@ -339,7 +353,7 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
 
   const submitAuthorizationCode = async () => {
     const operationId = activeOperationId.current;
-    if (!authorizationCode.trim() || !operationId) return;
+    if (!authorizationCode.trim() || !operationId || returningToAuthorization) return;
     setSubmittingCode(true);
     setError(null);
     try {
@@ -354,6 +368,31 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
       setError(messageFrom(caught));
     } finally {
       setSubmittingCode(false);
+    }
+  };
+
+  const returnToAuthorization = async () => {
+    const operationId = activeOperationId.current;
+    if (!operationId || authorizationReturnInFlight.current || submittingCode) return;
+
+    authorizationReturnInFlight.current = true;
+    setReturningToAuthorization(true);
+    setError(null);
+    try {
+      await rpc.call("reopenAuthorization", { operationId, threadId });
+    } catch (caught) {
+      if (
+        isMounted.current &&
+        activeOperationId.current === operationId &&
+        !dialogDismissed.current
+      ) {
+        setError(messageFrom(caught));
+      }
+    } finally {
+      if (isMounted.current && activeOperationId.current === operationId) {
+        authorizationReturnInFlight.current = false;
+        setReturningToAuthorization(false);
+      }
     }
   };
 
@@ -444,9 +483,10 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
           {switchingMode === "login" && activeStep !== "admitting" && (
             <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
               <p className="text-sm text-muted-foreground">
-                BB asks Chrome at most once for this switch. It does not use cookies
-                from your normal windows. Existing Incognito windows share one session,
-                so close them first if you need a fresh Claude sign-in.
+                BB opens one automatic Chrome Incognito handoff for this switch. It does
+                not use cookies from your normal windows. Existing Incognito windows
+                share one session, so close them first if you need a fresh Claude
+                sign-in.
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Icon name="Loading" className="animate-spin" aria-hidden="true" />
@@ -457,6 +497,28 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
                 profile; BB never reads or copies them. Leave this dialog open until
                 Claude Code confirms the login.
               </p>
+              {activeStep === "login" &&
+                switchPhase === "cancellable" &&
+                (canReturnToAuthorization || returningToAuthorization) && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      If switching accounts lands on Claude&apos;s home page, keep that
+                      Incognito window open and return here.
+                    </p>
+                    <Button
+                      aria-busy={returningToAuthorization || undefined}
+                      className="w-full"
+                      disabled={returningToAuthorization || submittingCode}
+                      onClick={() => void returnToAuthorization()}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {returningToAuthorization
+                        ? "Opening authorization…"
+                        : "Return to authorization"}
+                    </Button>
+                  </div>
+                )}
               {activeStep === "login" &&
               switchPhase === "cancellable" &&
               !codeExpanded ? (
@@ -482,7 +544,12 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
                   />
                   <Button
                     className="w-full"
-                    disabled={!codeReady || !authorizationCode.trim() || submittingCode}
+                    disabled={
+                      !codeReady ||
+                      !authorizationCode.trim() ||
+                      submittingCode ||
+                      returningToAuthorization
+                    }
                     onClick={() => void submitAuthorizationCode()}
                     size="sm"
                   >

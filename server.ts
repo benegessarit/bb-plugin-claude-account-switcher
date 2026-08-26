@@ -2,7 +2,9 @@ import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { rpcContract } from "./contract";
 import {
   buildClaudeAuthStatusCommand,
+  buildClaudeAuthorizationReopenCommand,
   buildClaudeLoginCommand,
+  runClaudeAuthorizationReopen,
   runClaudeAuthStatus,
   runClaudeLogin,
   type LoginTerminal,
@@ -49,6 +51,14 @@ interface OwnedTerminalRecord {
 }
 
 interface ActiveSwitch {
+  authorizationAction?: Promise<void>;
+  authorizationActionsClosed: boolean;
+  authorizationLauncher?: {
+    readonly hostId: string;
+    readonly loginTerminalId: string;
+    readonly path: string;
+  };
+  authorizationTerminal?: { readonly hostId: string; readonly id: string };
   readonly controller: AbortController;
   readonly id: string;
   readonly mode: "current" | "login";
@@ -71,6 +81,43 @@ interface FinishedSwitch {
   readonly id: string;
   readonly mode: "current" | "login";
   readonly threadId: string;
+}
+
+type AuthorizationLauncher = NonNullable<ActiveSwitch["authorizationLauncher"]>;
+type LoginTerminalRef = NonNullable<ActiveSwitch["loginTerminal"]>;
+
+function availableAuthorizationLauncher(
+  active: ActiveSwitch | undefined,
+): AuthorizationLauncher | undefined {
+  if (
+    !active ||
+    active.mode !== "login" ||
+    active.phase !== "cancellable" ||
+    active.step !== "login" ||
+    active.authorizationActionsClosed ||
+    active.authorizationAction !== undefined ||
+    active.loginCodeSubmitting ||
+    !active.loginTerminal
+  ) {
+    return undefined;
+  }
+  return active.authorizationLauncher;
+}
+
+function availableLoginTerminal(
+  active: ActiveSwitch | undefined,
+): LoginTerminalRef | undefined {
+  if (
+    !active ||
+    active.mode !== "login" ||
+    active.phase !== "cancellable" ||
+    active.authorizationAction !== undefined ||
+    active.authorizationTerminal !== undefined ||
+    active.loginCodeSubmitting
+  ) {
+    return undefined;
+  }
+  return active.loginTerminal;
 }
 
 function messageFrom(error: unknown): string {
@@ -214,7 +261,15 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function settleTerminal(terminalId: string): Promise<void> {
     for (const active of activeSwitches.values()) {
-      if (active.loginTerminal?.id === terminalId) active.loginTerminal = undefined;
+      if (active.loginTerminal?.id === terminalId) {
+        active.loginTerminal = undefined;
+        if (active.authorizationLauncher?.loginTerminalId === terminalId) {
+          active.authorizationLauncher = undefined;
+        }
+      }
+      if (active.authorizationTerminal?.id === terminalId) {
+        active.authorizationTerminal = undefined;
+      }
     }
     if (!ownedTerminals.delete(terminalId)) return;
     ownershipRevision += 1;
@@ -386,10 +441,9 @@ export default async function plugin(bb: BbPluginApi) {
       const active = activeSwitches.get(threadId);
       if (active) {
         return {
-          codeReady:
-            active.phase === "cancellable" &&
-            active.loginTerminal !== undefined &&
-            !active.loginCodeSubmitting,
+          canReturnToAuthorization:
+            availableAuthorizationLauncher(active) !== undefined,
+          codeReady: availableLoginTerminal(active) !== undefined,
           mode: active.mode,
           operationId: active.id,
           phase: active.phase,
@@ -408,17 +462,94 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
 
+    async reopenAuthorization({ operationId, threadId }) {
+      const active = activeSwitches.get(threadId);
+      const authorization = availableAuthorizationLauncher(active);
+      if (!active || active.id !== operationId || !authorization) {
+        throw new Error("Claude login is not waiting to return to authorization.");
+      }
+
+      const action = (async () => {
+        const unresolved = active.authorizationTerminal;
+        if (unresolved) {
+          let closed: LoginTerminal;
+          try {
+            closed = await closeTerminal(unresolved.id, "force");
+          } catch {
+            throw new Error(
+              "A previous authorization helper is still being cleaned up. Try again in a moment.",
+            );
+          }
+          if (!(await releaseTerminalIfExited(unresolved.id, closed))) {
+            throw new Error(
+              "A previous authorization helper is still being cleaned up. Try again in a moment.",
+            );
+          }
+        }
+
+        await runClaudeAuthorizationReopen(
+          {
+            close: closeTerminal,
+            create: async () => {
+              const terminal = await bb.sdk.terminals.create({
+                cols: 80,
+                rows: 8,
+                scope: {
+                  cwd: null,
+                  hostId: authorization.hostId,
+                  kind: "host_path",
+                },
+                start: {
+                  mode: "command",
+                  command: buildClaudeAuthorizationReopenCommand(authorization.path),
+                },
+                title: "Return to Claude authorization",
+              });
+              if (activeSwitches.get(threadId) === active) {
+                active.authorizationTerminal = {
+                  hostId: terminal.hostId,
+                  id: terminal.id,
+                };
+              }
+              try {
+                return await adoptCreatedTerminal(terminal, authorization.hostId);
+              } catch (error) {
+                if (
+                  activeSwitches.get(threadId) === active &&
+                  active.authorizationTerminal?.id === terminal.id &&
+                  !ownedTerminals.has(terminal.id)
+                ) {
+                  active.authorizationTerminal = undefined;
+                }
+                throw error;
+              }
+            },
+            get: (terminalId, signal) => bb.sdk.terminals.get({ signal, terminalId }),
+            onCleanupFailed: adoptTerminal,
+            onSettled: settleTerminal,
+          },
+          threadId,
+          { signal: active.controller.signal },
+        );
+      })();
+      active.authorizationAction = action;
+      try {
+        await action;
+        return { opened: true as const };
+      } finally {
+        if (
+          activeSwitches.get(threadId) === active &&
+          active.authorizationAction === action
+        ) {
+          active.authorizationAction = undefined;
+        }
+      }
+    },
+
     async submitLoginCode({ code, operationId, threadId }) {
       const active = activeSwitches.get(threadId);
-      const terminal = active?.loginTerminal;
-      if (
-        !active ||
-        active.id !== operationId ||
-        active.mode !== "login" ||
-        active.phase !== "cancellable" ||
-        active.loginCodeSubmitting ||
-        !terminal
-      ) {
+      const terminal = availableLoginTerminal(active);
+      if (!active || active.id !== operationId || !terminal) {
         throw new Error("Claude login is not waiting for an authorization code.");
       }
       active.loginCodeSubmitting = true;
@@ -468,6 +599,7 @@ export default async function plugin(bb: BbPluginApi) {
       const active: ActiveSwitch = {
         admitted: false,
         admissionSettled: false,
+        authorizationActionsClosed: false,
         controller,
         id: operationId,
         loginCodeSubmitting: false,
@@ -481,10 +613,14 @@ export default async function plugin(bb: BbPluginApi) {
         threadId,
       };
       active.settled = result.then(
-        (switchResult) => {
+        async (switchResult) => {
+          active.authorizationActionsClosed = true;
+          await active.authorizationAction?.catch(() => undefined);
           finishSwitch(active, { kind: "result", result: switchResult });
         },
-        (error: unknown) => {
+        async (error: unknown) => {
+          active.authorizationActionsClosed = true;
+          await active.authorizationAction?.catch(() => undefined);
           finishSwitch(active, { kind: "error", message: messageFrom(error) });
         },
       );
@@ -559,6 +695,18 @@ export default async function plugin(bb: BbPluginApi) {
                     },
                     targetThreadId,
                     {
+                      onAuthorizationReady: (terminalId, path) => {
+                        if (
+                          activeSwitches.get(threadId) === active &&
+                          active.phase === "cancellable"
+                        ) {
+                          active.authorizationLauncher = {
+                            hostId,
+                            loginTerminalId: terminalId,
+                            path,
+                          };
+                        }
+                      },
                       onInputReady: (terminalId) => {
                         active.loginTerminal = { hostId, id: terminalId };
                       },

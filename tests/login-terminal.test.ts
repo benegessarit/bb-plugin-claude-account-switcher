@@ -14,8 +14,10 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import * as loginTerminal from "../login-terminal.ts";
 import {
+  buildClaudeAuthorizationReopenCommand,
   buildChromeIncognitoLauncher,
   buildClaudeLoginCommand,
+  runClaudeAuthorizationReopen,
   runClaudeAuthStatus,
   runClaudeLogin,
   type AuthStatusTerminalClient,
@@ -23,6 +25,13 @@ import {
   type LoginTerminal,
   type LoginTerminalClient,
 } from "../login-terminal.ts";
+
+const VALID_OAUTH_URL =
+  "https://claude.com/cai/oauth/authorize?response_type=code&client_id=client%2Bid&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=state%2Bvalue&code_challenge=challenge%2Bvalue&code_challenge_method=S256#callback";
+const SECOND_VALID_OAUTH_URL = VALID_OAUTH_URL.replace(
+  "state=state%2Bvalue",
+  "state=second%2Bstate",
+);
 
 function terminal(
   status: LoginTerminal["status"],
@@ -83,9 +92,7 @@ test("the Incognito launcher invokes one browser executable without a profile ov
   try {
     await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
     await chmod(launcherPath, 0o700);
-    const oauthUrl =
-      "https://claude.com/cai/oauth/authorize?code=true&client_id=client%2Bid&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=state%2Bvalue#callback";
-    const result = spawnSync(launcherPath, [oauthUrl], {
+    const result = spawnSync(launcherPath, [VALID_OAUTH_URL], {
       encoding: "utf8",
       env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
     });
@@ -94,8 +101,121 @@ test("the Incognito launcher invokes one browser executable without a profile ov
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
-      oauthUrl,
+      VALID_OAUTH_URL,
     ]);
+    assert.equal(
+      (await readFile(`${launcherPath}.authorization-url`, "utf8")).trim(),
+      VALID_OAUTH_URL,
+    );
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("explicit authorization reopen uses the saved URL without consuming another automatic callback", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login."));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
+
+    assert.equal(
+      spawnSync(launcherPath, [VALID_OAUTH_URL], { encoding: "utf8", env }).status,
+      0,
+    );
+    assert.equal(
+      spawnSync(
+        "/bin/sh",
+        ["-c", buildClaudeAuthorizationReopenCommand(launcherPath)],
+        {
+          encoding: "utf8",
+          env,
+        },
+      ).status,
+      0,
+    );
+    assert.equal(
+      spawnSync(launcherPath, [SECOND_VALID_OAUTH_URL], { encoding: "utf8", env })
+        .status,
+      0,
+    );
+
+    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      VALID_OAUTH_URL,
+      "--incognito",
+      "--new-window",
+      VALID_OAUTH_URL,
+    ]);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("authorization reopen reports not ready before Claude supplies the URL", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login."));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(fakeBrowser, ["#!/bin/sh", "exit 0"].join("\n"));
+  await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+  await chmod(fakeBrowser, 0o755);
+  await chmod(launcherPath, 0o700);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      ["-c", buildClaudeAuthorizationReopenCommand(launcherPath)],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 75, result.stderr);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the Incognito launcher rejects HTTPS URLs outside Claude consent", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-consent-url-"));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    for (const candidate of [
+      "https://claude.com/",
+      "https://claude.com.evil.test/cai/oauth/authorize?response_type=code&state=x&code_challenge=y",
+      "https://user@claude.com/cai/oauth/authorize?response_type=code&state=x&code_challenge=y",
+      "https://claude.com:444/cai/oauth/authorize?response_type=code&state=x&code_challenge=y",
+      "https://claude.com/cai/oauth/authorize?response_type=code&code_challenge=y",
+      "https://claude.com/cai/oauth/authorize?response_type=code&state=x",
+    ]) {
+      const result = spawnSync(launcherPath, [candidate], {
+        encoding: "utf8",
+        env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
+      });
+      assert.equal(result.status, 78, candidate);
+    }
+    await assert.rejects(access(browserArgs));
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
   }
@@ -128,7 +248,7 @@ test("concurrent Incognito callbacks invoke the browser at most once", async () 
       BB_SWITCH_BROWSER_RELEASE: releaseBrowser,
       BB_SWITCH_BROWSER_STARTED: browserStarted,
     };
-    const first = spawn(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
+    const first = spawn(launcherPath, [VALID_OAUTH_URL], {
       env,
       stdio: "ignore",
     });
@@ -144,7 +264,7 @@ test("concurrent Incognito callbacks invoke the browser at most once", async () 
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
-    const second = spawnSync(launcherPath, ["https://claude.ai/oauth/authorize"], {
+    const second = spawnSync(launcherPath, [SECOND_VALID_OAUTH_URL], {
       encoding: "utf8",
       env,
     });
@@ -155,7 +275,7 @@ test("concurrent Incognito callbacks invoke the browser at most once", async () 
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
-      "https://claude.com/cai/oauth/authorize",
+      VALID_OAUTH_URL,
     ]);
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
@@ -181,11 +301,11 @@ test("the Incognito launcher does not retry after the browser command fails", as
     await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
     await chmod(launcherPath, 0o700);
     const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
-    const first = spawnSync(launcherPath, ["https://claude.com/cai/oauth/authorize"], {
+    const first = spawnSync(launcherPath, [VALID_OAUTH_URL], {
       encoding: "utf8",
       env,
     });
-    const second = spawnSync(launcherPath, ["https://claude.ai/oauth/authorize"], {
+    const second = spawnSync(launcherPath, [SECOND_VALID_OAUTH_URL], {
       encoding: "utf8",
       env,
     });
@@ -195,7 +315,7 @@ test("the Incognito launcher does not retry after the browser command fails", as
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
-      "https://claude.com/cai/oauth/authorize",
+      VALID_OAUTH_URL,
     ]);
   } finally {
     await rm(fixtureRoot, { force: true, recursive: true });
@@ -241,7 +361,8 @@ test("the complete login command launches Chrome Incognito and removes its helpe
     [
       "#!/bin/sh",
       'test "$1" = auth && test "$2" = login && test "$3" = --claudeai || exit 91',
-      'exec "$BROWSER" "https://claude.com/cai/oauth/authorize"',
+      "exec 3>&-",
+      `exec "$BROWSER" ${JSON.stringify(VALID_OAUTH_URL)}`,
     ].join("\n"),
   );
   await writeFile(
@@ -275,10 +396,15 @@ test("the complete login command launches Chrome Incognito and removes its helpe
     });
 
     assert.equal(result.status, 0, result.stderr);
+    assert.match(
+      result.stdout,
+      /BB_CLAUDE_LOGIN_AUTHORIZATION_READY:.*\/bb-claude-login\.[^/]+\/open-chrome-incognito/,
+    );
+    assert.doesNotMatch(result.stdout, /https:\/\//);
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
       "--new-window",
-      "https://claude.com/cai/oauth/authorize",
+      VALID_OAUTH_URL,
     ]);
     assert.equal(
       (await readdir(fixtureRoot)).some((name) => name.startsWith("bb-claude-login.")),
@@ -582,6 +708,100 @@ test("authorization-code input becomes available only after terminal echo is hid
 
   assert.equal(outputReads, 1);
   assert.deepEqual(readyTerminalIds, ["terminal_1"]);
+});
+
+test("authorization return becomes available from the parent launcher marker", async () => {
+  const ready: Array<{ terminalId: string; launcherPath: string }> = [];
+  const launcherPath = "/private/tmp/bb-claude-login.A1b2C3/open-chrome-incognito";
+
+  await runClaudeLogin(
+    {
+      close: async () => terminal("exited", 0),
+      create: async () => terminal("running"),
+      get: async () => terminal("exited", 0),
+      output: async () =>
+        `BB_CLAUDE_LOGIN_AUTHORIZATION_READY:${launcherPath}\nBB_CLAUDE_LOGIN_INPUT_READY\n`,
+    },
+    "thread_1",
+    {
+      onAuthorizationReady: (terminalId, path) => {
+        ready.push({ launcherPath: path, terminalId });
+      },
+      sleep: async () => undefined,
+    },
+  );
+
+  assert.deepEqual(ready, [{ launcherPath, terminalId: "terminal_1" }]);
+});
+
+test("authorization return rejects an untrusted launcher marker", async () => {
+  await assert.rejects(
+    runClaudeLogin(
+      {
+        close: async () => terminal("exited", 1),
+        create: async () => terminal("running"),
+        get: async () => terminal("running"),
+        output: async () =>
+          "BB_CLAUDE_LOGIN_AUTHORIZATION_READY:/private/tmp/not-the-login-helper\n",
+      },
+      "thread_1",
+      {
+        onAuthorizationReady: () => undefined,
+        sleep: async () => undefined,
+        timeoutMs: 1,
+      },
+    ),
+    /authorization helper path was invalid/i,
+  );
+});
+
+test("authorization reopen settles a clean one-shot helper", async () => {
+  const closes: Array<"force" | "if-clean"> = [];
+  const settled: string[] = [];
+
+  await runClaudeAuthorizationReopen(
+    {
+      close: async (terminalId, mode) => {
+        closes.push(mode);
+        return { ...terminal("exited", 0), id: terminalId };
+      },
+      create: async () => ({ ...terminal("running"), id: "reopen_terminal" }),
+      get: async () => ({ ...terminal("exited", 0), id: "reopen_terminal" }),
+      onSettled: (terminalId) => {
+        settled.push(terminalId);
+      },
+    },
+    "thread_1",
+    { sleep: async () => undefined },
+  );
+
+  assert.deepEqual(closes, ["if-clean"]);
+  assert.deepEqual(settled, ["reopen_terminal"]);
+});
+
+test("authorization reopen keeps an unconfirmed helper owned", async () => {
+  const cleanupFailed: string[] = [];
+
+  await assert.rejects(
+    runClaudeAuthorizationReopen(
+      {
+        close: async (terminalId) => ({
+          ...terminal("disconnected"),
+          id: terminalId,
+        }),
+        create: async () => ({ ...terminal("running"), id: "reopen_terminal" }),
+        get: async () => ({ ...terminal("disconnected"), id: "reopen_terminal" }),
+        onCleanupFailed: (terminalId) => {
+          cleanupFailed.push(terminalId);
+        },
+      },
+      "thread_1",
+      { sleep: async () => undefined },
+    ),
+    /could not be confirmed/i,
+  );
+
+  assert.deepEqual(cleanupFailed, ["reopen_terminal"]);
 });
 
 test("a failed terminal login does not report success", async () => {

@@ -94,6 +94,7 @@ export const rpcContract = defineRpcContract({
       z.object({ status: z.literal("none") }).strict(),
       z
         .object({
+          canReturnToAuthorization: z.boolean(),
           codeReady: z.boolean(),
           mode: z.enum(["current", "login"]),
           operationId: z.string().uuid(),
@@ -111,6 +112,10 @@ export const rpcContract = defineRpcContract({
         })
         .strict(),
     ]),
+  },
+  reopenAuthorization: {
+    input: operationInput,
+    output: z.object({ opened: z.literal(true) }).strict(),
   },
   submitLoginCode: {
     input: loginCodeInput,

@@ -3,6 +3,11 @@ function shellQuote(value: string): string {
 }
 
 export const LOGIN_INPUT_READY_MARKER = "BB_CLAUDE_LOGIN_INPUT_READY";
+export const LOGIN_AUTHORIZATION_READY_MARKER = "BB_CLAUDE_LOGIN_AUTHORIZATION_READY:";
+
+const AUTHORIZATION_REOPEN_ARGUMENT = "--bb-reopen-authorization";
+const AUTHORIZATION_NOT_READY_EXIT_CODE = 75;
+const AUTHORIZATION_HELPER_ERROR_EXIT_CODE = 78;
 
 function requireAbsoluteExecutablePath(value: string, error: string): string {
   if (!value.startsWith("/") || value.includes("\0")) {
@@ -18,6 +23,42 @@ function requireAbsoluteClaudePath(claudeExecutablePath: string): string {
   );
 }
 
+function requireAuthorizationLauncherPath(value: string): string {
+  requireAbsoluteExecutablePath(
+    value,
+    "The Claude authorization helper path was invalid.",
+  );
+  if (value.length > 4_096 || /[\x00-\x1f\x7f]/.test(value)) {
+    throw new Error("The Claude authorization helper path was invalid.");
+  }
+  const segments = value.split("/");
+  const launcherName = segments.at(-1);
+  const directoryName = segments.at(-2);
+  if (
+    launcherName !== "open-chrome-incognito" ||
+    !directoryName ||
+    !/^bb-claude-login\.[A-Za-z0-9]+$/.test(directoryName)
+  ) {
+    throw new Error("The Claude authorization helper path was invalid.");
+  }
+  return value;
+}
+
+function authorizationLauncherFromOutput(output: string): string | undefined {
+  let launcherPath: string | undefined;
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.startsWith(LOGIN_AUTHORIZATION_READY_MARKER)) continue;
+    const candidate = requireAuthorizationLauncherPath(
+      line.slice(LOGIN_AUTHORIZATION_READY_MARKER.length),
+    );
+    if (launcherPath !== undefined && launcherPath !== candidate) {
+      throw new Error("The Claude authorization helper path was invalid.");
+    }
+    launcherPath = candidate;
+  }
+  return launcherPath;
+}
+
 export function buildChromeIncognitoLauncher(browserExecutablePath?: string): string {
   if (browserExecutablePath !== undefined) {
     requireAbsoluteExecutablePath(
@@ -26,17 +67,40 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     );
   }
 
+  const cleanupInitial =
+    '/bin/unlink "$claim" 2>/dev/null || true; /bin/unlink "$url_file" 2>/dev/null || true; /bin/unlink "$url_pending" 2>/dev/null || true';
   const launch = (browser: string) => [
     `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`,
-    '/bin/unlink "$claim" 2>/dev/null || true',
-    "exit 78",
+    `if test "$initial" = true; then ${cleanupInitial}; fi`,
+    `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
   ];
+  const validateUrl = [
+    "const raw=process.argv[1]",
+    'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))process.exit(1)',
+    'try{const url=new URL(raw);if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize"||url.searchParams.get("response_type")!=="code"||!url.searchParams.get("state")||!url.searchParams.get("code_challenge"))process.exit(1)}catch{process.exit(1)}',
+  ].join(";");
   const lines = [
     "#!/bin/sh",
-    'url="${1-}"',
-    'case "$url" in https://*) ;; *) exit 78 ;; esac',
     'claim="${0}.opened"',
-    '(set -C; : > "$claim") 2>/dev/null || exit 0',
+    'url_file="${0}.authorization-url"',
+    'url_pending="${0}.authorization-url.pending"',
+    "initial=false",
+    `if test "\${1-}" = ${shellQuote(AUTHORIZATION_REOPEN_ARGUMENT)}; then`,
+    `  test "$#" -eq 1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    `  test -r "$url_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    `  IFS= read -r url < "$url_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    "else",
+    `  test "$#" -eq 1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    '  url="${1-}"',
+    "  initial=true",
+    '  (set -C; : > "$claim") 2>/dev/null || exit 0',
+    "fi",
+    `command node -e ${shellQuote(validateUrl)} "$url" >/dev/null 2>&1 || { test "$initial" = true && /bin/unlink "$claim" 2>/dev/null || true; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    'if test "$initial" = true; then',
+    "  umask 077",
+    `  /usr/bin/printf '%s\\n' "$url" > "$url_pending" || { ${cleanupInitial}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    `  /bin/mv "$url_pending" "$url_file" || { ${cleanupInitial}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    "fi",
   ];
   const fixedBrowserPaths = browserExecutablePath
     ? [browserExecutablePath]
@@ -52,20 +116,23 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     lines.push(
       'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
       '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
-      '  /bin/unlink "$claim" 2>/dev/null || true',
-      "  exit 78",
+      `  if test "$initial" = true; then ${cleanupInitial}; fi`,
+      `  exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "fi",
       "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
       '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
       '  if test -n "$browser_path"; then',
       '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
-      '    /bin/unlink "$claim" 2>/dev/null || true',
-      "    exit 78",
+      `    if test "$initial" = true; then ${cleanupInitial}; fi`,
+      `    exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "  fi",
       "done",
     );
   }
-  lines.push('/bin/unlink "$claim" 2>/dev/null || true', "exit 78");
+  lines.push(
+    `if test "$initial" = true; then ${cleanupInitial}; fi`,
+    `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+  );
   return `${lines.join("\n")}\n`;
 }
 
@@ -92,18 +159,27 @@ export function buildClaudeLoginCommand(
     'browser_dir="$("$mktemp_command" -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
     'browser_launcher="$browser_dir/open-chrome-incognito"',
     'browser_claim="$browser_launcher.opened"',
-    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
+    'browser_authorization="$browser_launcher.authorization-url"',
+    'browser_authorization_pending="$browser_launcher.authorization-url.pending"',
+    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_authorization" 2>/dev/null || true; /bin/unlink "$browser_authorization_pending" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
     "trap cleanup_login EXIT",
     "trap 'exit 129' HUP",
     "trap 'exit 130' INT",
     "trap 'exit 143' TERM",
     `/usr/bin/printf '%s' ${shellQuote(browserLauncher)} > "$browser_launcher" || exit 78`,
     '/bin/chmod 700 "$browser_launcher" || exit 78',
+    `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_AUTHORIZATION_")} ${shellQuote("READY:")}"$browser_launcher"`,
     `${shellQuote(sttyExecutable)} -echo >/dev/null 2>&1 || exit 79`,
     `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
     `BROWSER="$browser_launcher" ${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
   ].join("; ");
   return `/bin/sh -c ${shellQuote(script)}`;
+}
+
+export function buildClaudeAuthorizationReopenCommand(launcherPath: string): string {
+  return `${shellQuote(requireAuthorizationLauncherPath(launcherPath))} ${shellQuote(
+    AUTHORIZATION_REOPEN_ARGUMENT,
+  )}`;
 }
 
 export function buildClaudeAuthStatusCommand(
@@ -191,6 +267,7 @@ export interface AuthStatusTerminalClient extends LoginTerminalClient {
 
 export interface LoginWaitOptions {
   readonly now?: () => number;
+  readonly onAuthorizationReady?: (terminalId: string, launcherPath: string) => void;
   readonly onInputReady?: (terminalId: string) => void;
   readonly onSuccess?: () => void;
   readonly pollMs?: number;
@@ -244,6 +321,7 @@ export async function runClaudeLogin(
   let closeMode: "force" | "if-clean" = "force";
   let committed = false;
   let completionKnown = false;
+  let authorizationReady = false;
   let inputReady = false;
   let outcomeError: Error | undefined;
 
@@ -256,16 +334,30 @@ export async function runClaudeLogin(
   try {
     let current = terminal;
     while (true) {
-      if (!inputReady && current.status === "running" && client.output) {
+      if (
+        (!inputReady ||
+          (!authorizationReady && options.onAuthorizationReady !== undefined)) &&
+        current.status === "running" &&
+        client.output
+      ) {
+        let output: string | undefined;
         try {
-          const output = await client.output(terminal.id, signal);
-          if (output.includes(LOGIN_INPUT_READY_MARKER)) {
+          output = await client.output(terminal.id, signal);
+        } catch {
+          // BB may briefly reject output while the command starts. Retrying is safe.
+        }
+        if (output !== undefined) {
+          if (!inputReady && output.includes(LOGIN_INPUT_READY_MARKER)) {
             inputReady = true;
             options.onInputReady?.(terminal.id);
           }
-        } catch {
-          // BB may briefly reject output while the command starts. The marker
-          // is the only output the login helper permits, so retrying is safe.
+          if (!authorizationReady && options.onAuthorizationReady !== undefined) {
+            const launcherPath = authorizationLauncherFromOutput(output);
+            if (launcherPath !== undefined) {
+              authorizationReady = true;
+              options.onAuthorizationReady(terminal.id, launcherPath);
+            }
+          }
         }
       }
       if (current.status === "exited") {
@@ -336,6 +428,88 @@ export async function runClaudeLogin(
       markCommitted();
     }
     await client.onCleanupFailed?.(terminal.id, terminal.hostId);
+  }
+
+  if (outcomeError) throw outcomeError;
+}
+
+export async function runClaudeAuthorizationReopen(
+  client: LoginTerminalClient,
+  threadId: string,
+  options: Pick<
+    LoginWaitOptions,
+    "now" | "pollMs" | "signal" | "sleep" | "timeoutMs"
+  > = {},
+): Promise<void> {
+  const now = options.now ?? Date.now;
+  const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
+  const signal = options.signal;
+  const sleep = options.sleep ?? defaultSleep;
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  if (signal?.aborted) {
+    throw new Error("Returning to Claude authorization was cancelled.");
+  }
+
+  const terminal = await client.create(threadId);
+  const deadline = now() + timeoutMs;
+  let closeMode: "force" | "if-clean" = "force";
+  let outcomeError: Error | undefined;
+
+  try {
+    let current = terminal;
+    while (true) {
+      if (current.status === "exited") {
+        closeMode = "if-clean";
+        if (current.exitCode === 0) break;
+        outcomeError =
+          current.exitCode === AUTHORIZATION_NOT_READY_EXIT_CODE
+            ? new Error(
+                "Claude has not opened the authorization page yet. Wait a moment and try again.",
+              )
+            : new Error("BB could not return to the pending Claude authorization.");
+        break;
+      }
+      if (current.status === "disconnected") {
+        outcomeError = new Error(
+          "The Claude authorization helper could not be confirmed stopped.",
+        );
+        break;
+      }
+      if (signal?.aborted) {
+        outcomeError = new Error("Returning to Claude authorization was cancelled.");
+        break;
+      }
+      if (now() >= deadline) {
+        outcomeError = new Error(
+          "The Claude authorization helper could not be confirmed stopped.",
+        );
+        break;
+      }
+      await waitForNextPoll(sleep, pollMs, signal);
+      current = await client.get(terminal.id, signal);
+    }
+  } catch (error) {
+    outcomeError =
+      error instanceof Error
+        ? error
+        : new Error("BB could not return to the pending Claude authorization.");
+  }
+
+  try {
+    const closed = await client.close(terminal.id, closeMode);
+    if (closed.status === "exited") {
+      await client.onSettled?.(terminal.id);
+    } else {
+      await client.onCleanupFailed?.(terminal.id, terminal.hostId);
+      outcomeError ??= new Error(
+        "The Claude authorization helper could not be confirmed stopped.",
+      );
+    }
+  } catch {
+    await client.onCleanupFailed?.(terminal.id, terminal.hostId);
+    outcomeError ??= new Error(
+      "The Claude authorization helper could not be confirmed stopped.",
+    );
   }
 
   if (outcomeError) throw outcomeError;
