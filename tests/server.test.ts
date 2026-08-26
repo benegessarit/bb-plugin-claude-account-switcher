@@ -809,7 +809,7 @@ test("authorization return reopens the pending URL on the same host and operatio
   }
 });
 
-test("authorization return keeps completion and the host reservation until its helper settles", async () => {
+test("authorization return settles before runtime release and keeps the host reservation", async () => {
   const launcherPath = "/private/tmp/bb-claude-login.A1b2C3/open-chrome-incognito";
   let loginCreated!: () => void;
   const created = new Promise<void>((resolve) => {
@@ -837,6 +837,11 @@ test("authorization return keeps completion and the host reservation until its h
   const stopped = new Promise<void>((resolve) => {
     threadStopped = resolve;
   });
+  let threadWasStopped = false;
+  let authStatusCreated!: () => void;
+  const statusCreated = new Promise<void>((resolve) => {
+    authStatusCreated = resolve;
+  });
   let loginMayExit = false;
   const host = createFakePluginHost({
     pluginId: "claude-account-switcher",
@@ -862,6 +867,7 @@ test("authorization return keeps completion and the host reservation until its h
             reopenCreateStarted();
             return reopenCreate;
           }
+          authStatusCreated();
           return {
             exitCode: null,
             hostId: "host_1",
@@ -900,6 +906,7 @@ test("authorization return keeps completion and the host reservation until its h
           status: "idle" as const,
         }),
         stop: async () => {
+          threadWasStopped = true;
           threadStopped();
           return { ok: true as const };
         },
@@ -932,8 +939,9 @@ test("authorization return keeps completion and the host reservation until its h
     });
     await reopenStarted;
     loginMayExit = true;
-    await stopped;
+    await statusCreated;
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(threadWasStopped, false);
 
     const secondAdmission = await host.harness.behavior.callRpc("beginSwitch", {
       mode: "current",
@@ -955,6 +963,7 @@ test("authorization return keeps completion and the host reservation until its h
       status: "running",
     });
     assert.deepEqual(await reopening, { opened: true });
+    await stopped;
     assert.deepEqual(await switching, { outcome: "ready-next-message" });
     assert.deepEqual(
       await beginAndAttach(host, {

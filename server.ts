@@ -137,6 +137,11 @@ function settledCancellationOutcome(active: ActiveSwitch) {
   };
 }
 
+async function closeAuthorizationActions(active: ActiveSwitch): Promise<void> {
+  active.authorizationActionsClosed = true;
+  await active.authorizationAction?.catch(() => undefined);
+}
+
 function decodeTerminalOutput(
   chunks: readonly { readonly dataBase64: string }[],
 ): string {
@@ -620,13 +625,11 @@ export default async function plugin(bb: BbPluginApi) {
       };
       active.settled = result.then(
         async (switchResult) => {
-          active.authorizationActionsClosed = true;
-          await active.authorizationAction?.catch(() => undefined);
+          await closeAuthorizationActions(active);
           finishSwitch(active, { kind: "result", result: switchResult });
         },
         async (error: unknown) => {
-          active.authorizationActionsClosed = true;
-          await active.authorizationAction?.catch(() => undefined);
+          await closeAuthorizationActions(active);
           finishSwitch(active, { kind: "error", message: messageFrom(error) });
         },
       );
@@ -723,6 +726,7 @@ export default async function plugin(bb: BbPluginApi) {
                 },
                 reconcileCleanup: reconcileFailedCleanup,
                 stopThread: async (targetThreadId) => {
+                  await closeAuthorizationActions(active);
                   await bb.sdk.threads.stop({ threadId: targetThreadId });
                 },
                 verifySubscription: async (targetThreadId, hostId, signal) => {
