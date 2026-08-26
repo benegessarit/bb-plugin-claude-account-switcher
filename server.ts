@@ -400,7 +400,10 @@ export default async function plugin(bb: BbPluginApi) {
     async attachSwitch({ operationId, threadId }) {
       purgeFinishedSwitches();
       const active = activeSwitches.get(threadId);
-      if (active?.id === operationId) return active.result;
+      if (active?.id === operationId) {
+        await active.settled;
+        return active.result;
+      }
       const finished = finishedSwitches.get(operationId);
       if (!finished || finished.threadId !== threadId) {
         return { outcome: "not-running" as const };
@@ -469,6 +472,8 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error("Claude login is not waiting to return to authorization.");
       }
 
+      const authorizationLease = {};
+      hostLocks.reserve(authorization.hostId, authorizationLease);
       const action = (async () => {
         const unresolved = active.authorizationTerminal;
         if (unresolved) {
@@ -537,6 +542,7 @@ export default async function plugin(bb: BbPluginApi) {
         await action;
         return { opened: true as const };
       } finally {
+        hostLocks.release(authorization.hostId, authorizationLease);
         if (
           activeSwitches.get(threadId) === active &&
           active.authorizationAction === action

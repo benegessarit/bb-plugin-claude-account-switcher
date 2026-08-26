@@ -8,6 +8,7 @@ export const LOGIN_AUTHORIZATION_READY_MARKER = "BB_CLAUDE_LOGIN_AUTHORIZATION_R
 const AUTHORIZATION_REOPEN_ARGUMENT = "--bb-reopen-authorization";
 const AUTHORIZATION_NOT_READY_EXIT_CODE = 75;
 const AUTHORIZATION_HELPER_ERROR_EXIT_CODE = 78;
+const CLAUDE_MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 
 function requireAbsoluteExecutablePath(value: string, error: string): string {
   if (!value.startsWith("/") || value.includes("\0")) {
@@ -77,7 +78,11 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
   const validateUrl = [
     "const raw=process.argv[1]",
     'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))process.exit(1)',
-    'try{const url=new URL(raw);if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize"||url.searchParams.get("response_type")!=="code"||!url.searchParams.get("state")||!url.searchParams.get("code_challenge"))process.exit(1)}catch{process.exit(1)}',
+    "let url",
+    "try{url=new URL(raw)}catch{process.exit(1)}",
+    'if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize")process.exit(1)',
+    'const single=(name)=>{const values=url.searchParams.getAll(name);return values.length===1&&values[0]!==""?values[0]:undefined}',
+    `if(single("response_type")!=="code"||!single("client_id")||single("redirect_uri")!==${JSON.stringify(CLAUDE_MANUAL_REDIRECT_URI)}||!single("scope")||!single("state")||!single("code_challenge")||single("code_challenge_method")!=="S256")process.exit(1)`,
   ].join(";");
   const lines = [
     "#!/bin/sh",

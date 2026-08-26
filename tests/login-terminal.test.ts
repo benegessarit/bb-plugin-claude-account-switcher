@@ -27,11 +27,17 @@ import {
 } from "../login-terminal.ts";
 
 const VALID_OAUTH_URL =
-  "https://claude.com/cai/oauth/authorize?response_type=code&client_id=client%2Bid&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=state%2Bvalue&code_challenge=challenge%2Bvalue&code_challenge_method=S256#callback";
+  "https://claude.com/cai/oauth/authorize?response_type=code&client_id=client%2Bid&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=state%2Bvalue&code_challenge=challenge%2Bvalue&code_challenge_method=S256#callback";
 const SECOND_VALID_OAUTH_URL = VALID_OAUTH_URL.replace(
   "state=state%2Bvalue",
   "state=second%2Bstate",
 );
+
+function changedOAuthUrl(change: (url: URL) => void): string {
+  const url = new URL(VALID_OAUTH_URL);
+  change(url);
+  return url.toString();
+}
 
 function terminal(
   status: LoginTerminal["status"],
@@ -208,6 +214,17 @@ test("the Incognito launcher rejects HTTPS URLs outside Claude consent", async (
       "https://claude.com:444/cai/oauth/authorize?response_type=code&state=x&code_challenge=y",
       "https://claude.com/cai/oauth/authorize?response_type=code&code_challenge=y",
       "https://claude.com/cai/oauth/authorize?response_type=code&state=x",
+      changedOAuthUrl((url) => url.searchParams.delete("client_id")),
+      changedOAuthUrl((url) => url.searchParams.append("client_id", "second")),
+      changedOAuthUrl((url) => url.searchParams.delete("redirect_uri")),
+      changedOAuthUrl((url) =>
+        url.searchParams.set("redirect_uri", "https://example.com/oauth/callback"),
+      ),
+      changedOAuthUrl((url) => url.searchParams.delete("scope")),
+      changedOAuthUrl((url) => url.searchParams.delete("code_challenge_method")),
+      changedOAuthUrl((url) => url.searchParams.set("code_challenge_method", "plain")),
+      changedOAuthUrl((url) => url.searchParams.append("state", "second")),
+      changedOAuthUrl((url) => url.searchParams.append("code_challenge", "second")),
     ]) {
       const result = spawnSync(launcherPath, [candidate], {
         encoding: "utf8",

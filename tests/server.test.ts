@@ -809,6 +809,186 @@ test("authorization return reopens the pending URL on the same host and operatio
   }
 });
 
+test("authorization return keeps completion and the host reservation until its helper settles", async () => {
+  const launcherPath = "/private/tmp/bb-claude-login.A1b2C3/open-chrome-incognito";
+  let loginCreated!: () => void;
+  const created = new Promise<void>((resolve) => {
+    loginCreated = resolve;
+  });
+  let reopenCreateStarted!: () => void;
+  const reopenStarted = new Promise<void>((resolve) => {
+    reopenCreateStarted = resolve;
+  });
+  let resolveReopenCreate!: (terminal: {
+    exitCode: null;
+    hostId: string;
+    id: string;
+    status: "running";
+  }) => void;
+  const reopenCreate = new Promise<{
+    exitCode: null;
+    hostId: string;
+    id: string;
+    status: "running";
+  }>((resolve) => {
+    resolveReopenCreate = resolve;
+  });
+  let threadStopped!: () => void;
+  const stopped = new Promise<void>((resolve) => {
+    threadStopped = resolve;
+  });
+  let loginMayExit = false;
+  const host = createFakePluginHost({
+    pluginId: "claude-account-switcher",
+    sdk: {
+      terminals: {
+        close: async ({ terminalId }) => ({
+          exitCode: 0,
+          hostId: "host_1",
+          id: terminalId,
+          status: "exited" as const,
+        }),
+        create: async ({ title }) => {
+          if (title === "Sign in to Claude") {
+            loginCreated();
+            return {
+              exitCode: null,
+              hostId: "host_1",
+              id: "login_terminal",
+              status: "running" as const,
+            };
+          }
+          if (title === "Return to Claude authorization") {
+            reopenCreateStarted();
+            return reopenCreate;
+          }
+          return {
+            exitCode: null,
+            hostId: "host_1",
+            id: `status_terminal_${title}`,
+            status: "running" as const,
+          };
+        },
+        get: async ({ terminalId }) => ({
+          exitCode: terminalId === "login_terminal" ? (loginMayExit ? 0 : null) : 0,
+          hostId: "host_1",
+          id: terminalId,
+          status:
+            terminalId === "login_terminal" && !loginMayExit
+              ? ("running" as const)
+              : ("exited" as const),
+        }),
+        output: async ({ terminalId }) => ({
+          chunks: [
+            {
+              dataBase64: Buffer.from(
+                terminalId === "login_terminal"
+                  ? `BB_CLAUDE_LOGIN_AUTHORIZATION_READY:${launcherPath}\nBB_CLAUDE_LOGIN_INPUT_READY\n`
+                  : "loggedIn=true\nauthMethod=claude.ai\napiProvider=firstParty\n",
+              ).toString("base64"),
+              seq: 1,
+            },
+          ],
+          nextSeq: 2,
+          truncated: false,
+        }),
+      },
+      threads: {
+        get: async () => ({
+          environment: { hostId: "host_1" },
+          providerId: "claude-code",
+          status: "idle" as const,
+        }),
+        stop: async () => {
+          threadStopped();
+          return { ok: true as const };
+        },
+      },
+    },
+  });
+  await plugin(host.bb);
+  const switching = beginAndAttach(host, {
+    operationId: DEFAULT_OPERATION_ID,
+    mode: "login",
+    threadId: "thread_1",
+  });
+  let switchSettled = false;
+  void switching.then(
+    () => {
+      switchSettled = true;
+    },
+    () => {
+      switchSettled = true;
+    },
+  );
+  let reopening: Promise<unknown> | undefined;
+
+  try {
+    await created;
+    await new Promise((resolve) => setImmediate(resolve));
+    reopening = host.harness.behavior.callRpc("reopenAuthorization", {
+      operationId: DEFAULT_OPERATION_ID,
+      threadId: "thread_1",
+    });
+    await reopenStarted;
+    loginMayExit = true;
+    await stopped;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const secondAdmission = await host.harness.behavior.callRpc("beginSwitch", {
+      mode: "current",
+      operationId: STALE_OPERATION_ID,
+      threadId: "thread_2",
+    });
+    assert.deepEqual(
+      { secondAdmission, switchSettled },
+      {
+        secondAdmission: { outcome: "host-busy" },
+        switchSettled: false,
+      },
+    );
+
+    resolveReopenCreate({
+      exitCode: null,
+      hostId: "host_1",
+      id: "reopen_terminal",
+      status: "running",
+    });
+    assert.deepEqual(await reopening, { opened: true });
+    assert.deepEqual(await switching, { outcome: "ready-next-message" });
+    assert.deepEqual(
+      await beginAndAttach(host, {
+        mode: "current",
+        operationId: STALE_OPERATION_ID,
+        threadId: "thread_2",
+      }),
+      { outcome: "ready-next-message" },
+    );
+  } finally {
+    resolveReopenCreate({
+      exitCode: null,
+      hostId: "host_1",
+      id: "reopen_terminal",
+      status: "running",
+    });
+    await reopening?.catch(() => undefined);
+    await host.harness.behavior
+      .callRpc("cancelSwitch", {
+        operationId: STALE_OPERATION_ID,
+        threadId: "thread_2",
+      })
+      .catch(() => undefined);
+    await host.harness.behavior
+      .callRpc("cancelSwitch", {
+        operationId: DEFAULT_OPERATION_ID,
+        threadId: "thread_1",
+      })
+      .catch(() => undefined);
+    await switching.catch(() => undefined);
+    await host.harness.lifecycle.dispose();
+  }
+});
+
 test("cancellation waits for an already-started authorization return helper", async () => {
   const launcherPath = "/private/tmp/bb-claude-login.A1b2C3/open-chrome-incognito";
   let loginCreated!: () => void;
