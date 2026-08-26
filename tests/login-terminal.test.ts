@@ -46,6 +46,18 @@ function terminal(
   return { hostId: "host_1", id: "terminal_1", status, exitCode };
 }
 
+async function readFileEventually(path: string, timeoutMs = 2_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
 function client(
   states: LoginTerminal[],
   closes: Array<"force" | "if-clean">,
@@ -70,10 +82,10 @@ test("the login command routes authorization through Chrome Incognito", () => {
   assert.doesNotMatch(command, /BB_CLAUDE_LOGIN_INPUT_READY/);
   assert.match(command, /BB_CLAUDE_LOGIN_/);
   assert.match(command, /INPUT_READY/);
-  assert.match(command, /auth login --claudeai/);
+  assert.match(command, /auth.*login.*--claudeai/);
   assert.match(command, /\/opt\/trusted claude\/bin\/claude/);
   assert.doesNotMatch(command, /command claude auth login/);
-  assert.match(command, /BROWSER=/);
+  assert.match(command, /BROWSER:launcher/);
   assert.match(command, /--incognito/);
   assert.match(command, /--new-window/);
   assert.match(command, /\/bin\/unlink/);
@@ -104,7 +116,7 @@ test("the Incognito launcher invokes one browser executable without a profile ov
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -157,7 +169,7 @@ test("explicit authorization reopen uses the saved URL without consuming another
       0,
     );
 
-    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -289,7 +301,7 @@ test("concurrent Incognito callbacks invoke the browser at most once", async () 
     assert.equal(second.status, 0, second.stderr);
     await writeFile(releaseBrowser, "release\n");
     assert.equal(await firstExit, 0);
-    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -329,7 +341,7 @@ test("the Incognito launcher does not retry after the browser command fails", as
 
     assert.equal(first.status, 42, first.stderr);
     assert.equal(second.status, 0, second.stderr);
-    assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -428,6 +440,504 @@ test("the complete login command launches Chrome Incognito and removes its helpe
       false,
     );
   } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login command opens Claude's printed fallback URL when BROWSER is not called", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-fallback-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      'test "$1" = auth && test "$2" = login && test "$3" = --claudeai || exit 91',
+      `/usr/bin/printf 'If the browser did not open, visit: %s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`,
+    ].join("\n"),
+  );
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        buildClaudeLoginCommand(fakeClaude, {
+          browserExecutablePath: fakeBrowser,
+          sttyExecutablePath: fakeStty,
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BB_SWITCH_BROWSER_ARGS: browserArgs,
+          TMPDIR: fixtureRoot,
+        },
+        timeout: 5_000,
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /https:\/\//);
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      VALID_OAUTH_URL,
+    ]);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login command still opens only one window when Claude also prints the URL", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-deduped-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      `"$BROWSER" ${JSON.stringify(VALID_OAUTH_URL)}`,
+      `/usr/bin/printf '%s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`,
+    ].join("\n"),
+  );
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        buildClaudeLoginCommand(fakeClaude, {
+          browserExecutablePath: fakeBrowser,
+          sttyExecutablePath: fakeStty,
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BB_SWITCH_BROWSER_ARGS: browserArgs,
+          TMPDIR: fixtureRoot,
+        },
+        timeout: 5_000,
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      VALID_OAUTH_URL,
+    ]);
+    assert.equal(
+      result.stdout.match(/BB_CLAUDE_LOGIN_AUTHORIZATION_READY:/g)?.length,
+      1,
+    );
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login observer preserves manual authorization-code input", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-input-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  await writeFile(
+    fakeClaude,
+    ["#!/bin/sh", "IFS= read -r code", 'test "$code" = "code#state"'].join("\n"),
+  );
+  await writeFile(fakeBrowser, ["#!/bin/sh", "exit 0"].join("\n"));
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        buildClaudeLoginCommand(fakeClaude, {
+          browserExecutablePath: fakeBrowser,
+          sttyExecutablePath: fakeStty,
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: fixtureRoot },
+        input: "code#state\n",
+        timeout: 5_000,
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login command does not report authorization ready before it has a URL", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-not-ready-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  await writeFile(fakeClaude, ["#!/bin/sh", "exit 1"].join("\n"));
+  await writeFile(fakeBrowser, ["#!/bin/sh", "exit 0"].join("\n"));
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        buildClaudeLoginCommand(fakeClaude, {
+          browserExecutablePath: fakeBrowser,
+          sttyExecutablePath: fakeStty,
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: fixtureRoot },
+        timeout: 5_000,
+      },
+    );
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.doesNotMatch(result.stdout, /BB_CLAUDE_LOGIN_AUTHORIZATION_READY:/);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login fallback waits for a complete ANSI-wrapped URL", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-framed-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const firstBreak = VALID_OAUTH_URL.indexOf("&code_challenge=");
+  const wrapBreak = VALID_OAUTH_URL.indexOf("&code_challenge_method=");
+  const first = VALID_OAUTH_URL.slice(0, firstBreak);
+  const second = VALID_OAUTH_URL.slice(firstBreak, wrapBreak);
+  const third = VALID_OAUTH_URL.slice(wrapBreak);
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      `/usr/bin/printf '\\033[2m%s' ${JSON.stringify(first)}`,
+      "/bin/sleep 0.05",
+      `/usr/bin/printf '%s\\n  %s\\033[0m\\n\\n' ${JSON.stringify(second)} ${JSON.stringify(third)}`,
+    ].join("\n"),
+  );
+  await writeFile(
+    fakeBrowser,
+    ["#!/bin/sh", '/usr/bin/printf \'%s\\n\' "$@" > "$BB_SWITCH_BROWSER_ARGS"'].join(
+      "\n",
+    ),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        buildClaudeLoginCommand(fakeClaude, {
+          browserExecutablePath: fakeBrowser,
+          sttyExecutablePath: fakeStty,
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BB_SWITCH_BROWSER_ARGS: browserArgs,
+          TMPDIR: fixtureRoot,
+        },
+        timeout: 5_000,
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
+      "--incognito",
+      "--new-window",
+      VALID_OAUTH_URL,
+    ]);
+    assert.doesNotMatch(result.stdout, /https:\/\//);
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("the login fallback does not wait for a newly launched browser to quit", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-long-browser-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserPidFile = join(fixtureRoot, "browser-pid");
+  await writeFile(
+    fakeClaude,
+    ["#!/bin/sh", `/usr/bin/printf '%s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`].join(
+      "\n",
+    ),
+  );
+  await writeFile(
+    fakeBrowser,
+    [
+      "#!/bin/sh",
+      '/usr/bin/printf \'%s\\n\' "$$" > "$BB_SWITCH_BROWSER_PID"',
+      "exec /bin/sleep 30",
+    ].join("\n"),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  const child = spawn(
+    "/bin/sh",
+    [
+      "-c",
+      buildClaudeLoginCommand(fakeClaude, {
+        browserExecutablePath: fakeBrowser,
+        sttyExecutablePath: fakeStty,
+      }),
+    ],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        BB_SWITCH_BROWSER_PID: browserPidFile,
+        TMPDIR: fixtureRoot,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let browserPid: number | undefined;
+
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("login observer waited for the browser process")),
+        2_000,
+      );
+      child.once("exit", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+      child.once("error", reject);
+    });
+    browserPid = Number((await readFileEventually(browserPidFile)).trim());
+
+    assert.equal(exitCode, 0);
+    assert.doesNotThrow(() => process.kill(browserPid!, 0));
+  } finally {
+    if (browserPid === undefined) {
+      try {
+        browserPid = Number((await readFile(browserPidFile, "utf8")).trim());
+      } catch {
+        // The browser may not have started before a failed assertion.
+      }
+    }
+    if (browserPid !== undefined && Number.isSafeInteger(browserPid)) {
+      try {
+        process.kill(browserPid, "SIGTERM");
+      } catch {
+        // The exact fixture process already exited.
+      }
+    }
+    if (child.exitCode === null) {
+      try {
+        process.kill(-child.pid!, "SIGTERM");
+      } catch {
+        // The exact fixture process group already exited.
+      }
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("cancelling login does not wait for a long-lived fallback browser", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-cancel-browser-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  const browserPidFile = join(fixtureRoot, "browser-pid");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      `/usr/bin/printf '%s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`,
+      "exec /bin/sleep 30",
+    ].join("\n"),
+  );
+  await writeFile(
+    fakeBrowser,
+    [
+      "#!/bin/sh",
+      '/usr/bin/printf \'%s\\n\' "$$" > "$BB_SWITCH_BROWSER_PID"',
+      "exec /bin/sleep 30",
+    ].join("\n"),
+  );
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  const child = spawn(
+    "/bin/sh",
+    [
+      "-c",
+      buildClaudeLoginCommand(fakeClaude, {
+        browserExecutablePath: fakeBrowser,
+        sttyExecutablePath: fakeStty,
+      }),
+    ],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        BB_SWITCH_BROWSER_PID: browserPidFile,
+        TMPDIR: fixtureRoot,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let browserPid: number | undefined;
+
+  try {
+    browserPid = Number((await readFileEventually(browserPidFile)).trim());
+    process.kill(-child.pid!, "SIGTERM");
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("cancelled login waited for the browser process")),
+        2_000,
+      );
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    assert.doesNotThrow(() => process.kill(browserPid!, 0));
+  } finally {
+    if (browserPid !== undefined && Number.isSafeInteger(browserPid)) {
+      try {
+        process.kill(browserPid, "SIGTERM");
+      } catch {
+        // The exact fixture process already exited.
+      }
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid!, "SIGTERM");
+      } catch {
+        // The exact fixture process group already exited.
+      }
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("a failed fallback browser launch stops with a safe error", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-browser-error-"));
+  const fakeClaude = join(fixtureRoot, "claude");
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const fakeStty = join(fixtureRoot, "stty");
+  await writeFile(
+    fakeClaude,
+    [
+      "#!/bin/sh",
+      `/usr/bin/printf '%s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`,
+      "exec /bin/sleep 30",
+    ].join("\n"),
+  );
+  await writeFile(fakeBrowser, ["#!/bin/sh", "exit 42"].join("\n"));
+  await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
+  await chmod(fakeClaude, 0o755);
+  await chmod(fakeBrowser, 0o755);
+  await chmod(fakeStty, 0o755);
+
+  const child = spawn(
+    "/bin/sh",
+    [
+      "-c",
+      buildClaudeLoginCommand(fakeClaude, {
+        browserExecutablePath: fakeBrowser,
+        sttyExecutablePath: fakeStty,
+      }),
+    ],
+    {
+      detached: true,
+      env: { ...process.env, TMPDIR: fixtureRoot },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("failed browser launch left Claude waiting")),
+        2_000,
+      );
+      child.once("exit", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+      child.once("error", reject);
+    });
+
+    assert.equal(exitCode, 78);
+    assert.match(stdout, /BB_CLAUDE_LOGIN_BROWSER_FAILED/);
+    assert.doesNotMatch(stdout, /https:\/\//);
+  } finally {
+    if (child.exitCode === null) {
+      try {
+        process.kill(-child.pid!, "SIGTERM");
+      } catch {
+        // The exact fixture process group already exited.
+      }
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
     await rm(fixtureRoot, { force: true, recursive: true });
   }
 });
@@ -683,6 +1193,30 @@ test("auth verification reads safe output before BB discards exited terminal out
     authMethod: "claude.ai",
     loggedIn: true,
   });
+  assert.deepEqual(closes, ["force"]);
+});
+
+test("a browser-launch failure is surfaced without waiting for login timeout", async () => {
+  const closes: Array<"force" | "if-clean"> = [];
+
+  await assert.rejects(
+    runClaudeLogin(
+      {
+        close: async (_terminalId, mode) => {
+          closes.push(mode);
+          return terminal("exited", 78);
+        },
+        create: async () => terminal("running"),
+        get: async () => terminal("running"),
+        output: async () =>
+          "BB_CLAUDE_LOGIN_INPUT_READY\nBB_CLAUDE_LOGIN_BROWSER_FAILED\n",
+      },
+      "thread_1",
+      { sleep: async () => undefined },
+    ),
+    /could not open Chrome/i,
+  );
+
   assert.deepEqual(closes, ["force"]);
 });
 

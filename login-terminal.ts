@@ -4,6 +4,7 @@ function shellQuote(value: string): string {
 
 export const LOGIN_INPUT_READY_MARKER = "BB_CLAUDE_LOGIN_INPUT_READY";
 export const LOGIN_AUTHORIZATION_READY_MARKER = "BB_CLAUDE_LOGIN_AUTHORIZATION_READY:";
+export const LOGIN_BROWSER_FAILED_MARKER = "BB_CLAUDE_LOGIN_BROWSER_FAILED";
 
 const AUTHORIZATION_REOPEN_ARGUMENT = "--bb-reopen-authorization";
 const AUTHORIZATION_NOT_READY_EXIT_CODE = 75;
@@ -60,6 +61,19 @@ function authorizationLauncherFromOutput(output: string): string | undefined {
   return launcherPath;
 }
 
+function buildAuthorizationUrlValidator(): string {
+  return [
+    "const isAuthorizationUrl=(raw)=>{",
+    'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))return false',
+    "let url",
+    "try{url=new URL(raw)}catch{return false}",
+    'if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize")return false',
+    'const single=(name)=>{const values=url.searchParams.getAll(name);return values.length===1&&values[0]!==""?values[0]:undefined}',
+    `return single("response_type")==="code"&&!!single("client_id")&&single("redirect_uri")===${JSON.stringify(CLAUDE_MANUAL_REDIRECT_URI)}&&!!single("scope")&&!!single("state")&&!!single("code_challenge")&&single("code_challenge_method")==="S256"`,
+    "}",
+  ].join(";");
+}
+
 export function buildChromeIncognitoLauncher(browserExecutablePath?: string): string {
   if (browserExecutablePath !== undefined) {
     requireAbsoluteExecutablePath(
@@ -75,15 +89,7 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     `if test "$initial" = true; then ${cleanupInitial}; fi`,
     `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
   ];
-  const validateUrl = [
-    "const raw=process.argv[1]",
-    'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))process.exit(1)',
-    "let url",
-    "try{url=new URL(raw)}catch{process.exit(1)}",
-    'if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize")process.exit(1)',
-    'const single=(name)=>{const values=url.searchParams.getAll(name);return values.length===1&&values[0]!==""?values[0]:undefined}',
-    `if(single("response_type")!=="code"||!single("client_id")||single("redirect_uri")!==${JSON.stringify(CLAUDE_MANUAL_REDIRECT_URI)}||!single("scope")||!single("state")||!single("code_challenge")||single("code_challenge_method")!=="S256")process.exit(1)`,
-  ].join(";");
+  const validateUrl = `${buildAuthorizationUrlValidator()};if(!isAuthorizationUrl(process.argv[1]))process.exit(1)`;
   const lines = [
     "#!/bin/sh",
     'claim="${0}.opened"',
@@ -146,12 +152,52 @@ export interface ClaudeLoginCommandOptions {
   readonly sttyExecutablePath?: string;
 }
 
+function buildClaudeLoginObserver(): string {
+  return [
+    'const fs=require("node:fs")',
+    'const {spawn}=require("node:child_process")',
+    'const {stripVTControlCharacters}=require("node:util")',
+    "const executable=process.argv[1]",
+    "const launcher=process.argv[2]",
+    "const LF=String.fromCharCode(10)",
+    "const CR=String.fromCharCode(13)",
+    'const authorizationFile=launcher+".authorization-url"',
+    `const authorizationMarker=${JSON.stringify(LOGIN_AUTHORIZATION_READY_MARKER)}`,
+    `const browserFailureMarker=${JSON.stringify(LOGIN_BROWSER_FAILED_MARKER)}`,
+    buildAuthorizationUrlValidator(),
+    'const isUriLine=(value)=>value!==""&&Array.from(value).every((character)=>{const code=character.charCodeAt(0);return code>32&&code!==127&&character!=="\\\""&&character!=="<"&&character!==">"})',
+    'const authorizationFrom=(value)=>{const clean=stripVTControlCharacters(value).split(CR).join("");const start=clean.lastIndexOf("https://claude.com/cai/oauth/authorize?");if(start<0)return;const lines=clean.slice(start).split(LF);if(lines.length<2)return;let candidate=lines[0].trim();for(let index=1;index<lines.length-1;index++){const part=lines[index].trim();if(!isUriLine(part))break;candidate+=part}return isAuthorizationUrl(candidate)?candidate:undefined}',
+    'let tail=""',
+    "let announced=false",
+    "let fallbackStarted=false",
+    "let launchFailed=false",
+    "let claudeClosed=false",
+    "let claudeExitCode=1",
+    "let finishDeadline=0",
+    "let timer",
+    "const announce=()=>{if(announced)return;try{fs.accessSync(authorizationFile,fs.constants.R_OK)}catch{return}announced=true;process.stdout.write(authorizationMarker+launcher+LF)}",
+    'const signalExitCode=(signal)=>signal==="SIGHUP"?129:signal==="SIGINT"?130:signal==="SIGTERM"?143:1',
+    "const finish=()=>{announce();if(!claudeClosed)return;if(fallbackStarted&&!announced&&!launchFailed&&Date.now()<finishDeadline)return;clearInterval(timer);process.exitCode=launchFailed?78:claudeExitCode}",
+    "let child",
+    'const failLaunch=()=>{if(launchFailed)return;launchFailed=true;process.stdout.write(browserFailureMarker+LF);if(!claudeClosed)child.kill("SIGTERM");finish()}',
+    'const launchFallback=(url)=>{fallbackStarted=true;const fallback=spawn(launcher,[url],{detached:true,stdio:"ignore"});fallback.unref();fallback.once("error",failLaunch);fallback.once("exit",(code)=>{if(code!==0)failLaunch()})}',
+    'const inspect=(chunk)=>{tail=(tail+chunk.toString("utf8")).slice(-131072);if(!fallbackStarted){const authorizationUrl=authorizationFrom(tail);if(authorizationUrl)launchFallback(authorizationUrl)}announce()}',
+    'child=spawn(executable,["auth","login","--claudeai"],{env:{...process.env,BROWSER:launcher},stdio:["inherit","pipe","pipe"]})',
+    'child.stdout.on("data",inspect)',
+    'child.stderr.on("data",inspect)',
+    "timer=setInterval(()=>{announce();finish()},50)",
+    'child.once("error",()=>{claudeClosed=true;claudeExitCode=78;finishDeadline=0;finish()})',
+    'child.once("close",(code,signal)=>{claudeClosed=true;claudeExitCode=code??signalExitCode(signal);finishDeadline=Date.now()+1000;finish()})',
+  ].join(";");
+}
+
 export function buildClaudeLoginCommand(
   claudeExecutablePath: string,
   options: ClaudeLoginCommandOptions = {},
 ): string {
   const executable = requireAbsoluteClaudePath(claudeExecutablePath);
   const browserLauncher = buildChromeIncognitoLauncher(options.browserExecutablePath);
+  const loginObserver = buildClaudeLoginObserver();
   const sttyExecutable = requireAbsoluteExecutablePath(
     options.sttyExecutablePath ?? "/bin/stty",
     "BB could not resolve the stty executable.",
@@ -173,10 +219,9 @@ export function buildClaudeLoginCommand(
     "trap 'exit 143' TERM",
     `/usr/bin/printf '%s' ${shellQuote(browserLauncher)} > "$browser_launcher" || exit 78`,
     '/bin/chmod 700 "$browser_launcher" || exit 78',
-    `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_AUTHORIZATION_")} ${shellQuote("READY:")}"$browser_launcher"`,
     `${shellQuote(sttyExecutable)} -echo >/dev/null 2>&1 || exit 79`,
     `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
-    `BROWSER="$browser_launcher" ${shellQuote(executable)} auth login --claudeai >/dev/null 2>&1`,
+    `command node -e ${shellQuote(loginObserver)} ${shellQuote(executable)} "$browser_launcher"`,
   ].join("; ");
   return `/bin/sh -c ${shellQuote(script)}`;
 }
@@ -352,6 +397,12 @@ export async function runClaudeLogin(
           // BB may briefly reject output while the command starts. Retrying is safe.
         }
         if (output !== undefined) {
+          if (output.includes(LOGIN_BROWSER_FAILED_MARKER)) {
+            outcomeError = new Error(
+              "BB could not open Chrome for Claude sign-in. This BB session was not changed.",
+            );
+            break;
+          }
           if (!inputReady && output.includes(LOGIN_INPUT_READY_MARKER)) {
             inputReady = true;
             options.onInputReady?.(terminal.id);

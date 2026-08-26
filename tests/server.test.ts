@@ -604,7 +604,7 @@ test("authorization code delivery is gated, serialized, and retry-safe", async (
       "terminals.create",
     )[0]![0] as { readonly start?: { readonly command?: string } };
     const loginCommand = loginRequest.start?.command ?? "";
-    assert.match(loginCommand, /BROWSER=/);
+    assert.match(loginCommand, /BROWSER:launcher/);
     assert.match(loginCommand, /--incognito/);
     assert.match(loginCommand, /--new-window/);
     assert.doesNotMatch(loginCommand, /--email|--user-data-dir|open -n|open -na/);
