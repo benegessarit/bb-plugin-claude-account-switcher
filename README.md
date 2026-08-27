@@ -6,7 +6,7 @@ The session header button has two paths:
 
 - **Use current login** verifies the Claude login already active on the session's machine, then asks BB to release the selected session's loaded runtime.
 - **Sign in to another account** starts Claude Code's standard subscription login and makes one automatic Chrome Incognito handoff. When an Incognito window remains open, Chrome adds the authorization tab there instead of forcing another window. Normal-window cookies are not used, but already-open Incognito windows share one session. Chrome may offer passwords from the active profile; BB never reads or copies them.
-- **Return to authorization** appears while Claude Code is waiting for the browser. If Claude's account switch sends you to its home page, this reopens the exact pending consent page in the same Incognito session without restarting the BB switch.
+- **Return to authorization** appears while Claude Code is waiting for the browser. If the browser leaves the pending flow, this reopens the exact pending consent page in the same Incognito session without restarting the BB switch.
 
 ## Requirements
 
@@ -36,9 +36,9 @@ Disable or remove it with `bb plugin disable claude-account-switcher` or `bb plu
 1. Wait until the Claude Code session is idle or in an error state.
 2. Select **Switch Claude login** in that session's header.
 3. Reuse the current machine login or sign in on Claude's website.
-4. Leave the BB dialog open until Claude Code confirms the login. If switching
-   accounts lands on Claude's home page, leave that Incognito window open and
-   select **Return to authorization** in BB. If Claude shows a one-time code
+4. Leave the BB dialog open until Claude Code confirms the login. If the browser
+   leaves the pending flow, leave that Incognito window open and select **Return
+   to authorization** in BB. If Claude shows a one-time code
    instead, expand **Claude showed a code?** and submit it. BB blocks overlapping
    actions and keeps the same operation retryable when safe.
 5. Send the next message in the same thread.
@@ -54,7 +54,7 @@ away does not.
 
 - BB plugins run with the user's BB privileges. This plugin can launch a host terminal command and stop the selected BB thread runtime. Install it only from a publisher you trust.
 - The plugin never reads Claude credential files or macOS Keychain.
-- The plugin gives Claude Code a short-lived browser launcher that validates and captures the first callback without opening Chrome. The observer is the sole automatic opener and invokes Chrome with `--incognito`, deliberately omitting `--new-window` so an existing Incognito window can be reused. The launcher accepts only Claude's exact HTTPS consent route with the required OAuth fields, then keeps the exact URL in a mode-`0600` operation-local temporary file so an explicit **Return to authorization** can reopen it. The URL never enters the plugin frontend, RPC payloads, BB storage, or logs.
+- The plugin gives Claude Code a short-lived browser launcher that captures Claude's native localhost callback without opening Chrome. The observer is the sole automatic opener and invokes Chrome with `--incognito`, deliberately omitting `--new-window` so an existing Incognito window can be reused. Claude's printed manual-code URL is retained only as a delayed fallback. The native callback has explicit priority and atomically replaces that fallback even if it arrives later. The launcher accepts only Claude's exact HTTPS consent route with the required OAuth fields and either an exact `http://localhost:<port>/callback` redirect or Claude's exact manual-code redirect. It keeps the selected URL in a mode-`0600` operation-local temporary file so an explicit **Return to authorization** can reopen it. The URL never enters the plugin frontend, RPC payloads, BB storage, or logs.
 - The launcher invokes the existing Chrome executable directly, without `--new-window`, `open -n`, or a temporary `--user-data-dir`. This excludes normal-window cookies, not the session shared by already-open Incognito windows. Password availability is controlled by Chrome's active profile, settings, and policy. The plugin never reads or copies passwords. Normal completion and graceful cancellation remove the launcher, URL, and claim. A machine or terminal `SIGKILL` can leave that owner-only temporary directory for the operating system's temporary-file cleanup.
 - The plugin uses the exact Claude Code executable reported by BB for the session's machine. It does not select Claude from the terminal's `PATH`.
 - The small auth-status filtering helper uses `node` from the session machine's

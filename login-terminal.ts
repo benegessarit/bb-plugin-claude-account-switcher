@@ -7,9 +7,11 @@ export const LOGIN_AUTHORIZATION_READY_MARKER = "BB_CLAUDE_LOGIN_AUTHORIZATION_R
 export const LOGIN_BROWSER_FAILED_MARKER = "BB_CLAUDE_LOGIN_BROWSER_FAILED";
 
 const AUTHORIZATION_REOPEN_ARGUMENT = "--bb-reopen-authorization";
+const AUTHORIZATION_OPEN_ARGUMENT = "--bb-open-authorization";
 const AUTHORIZATION_NOT_READY_EXIT_CODE = 75;
 const AUTHORIZATION_HELPER_ERROR_EXIT_CODE = 78;
 const CLAUDE_MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+const MANUAL_AUTHORIZATION_FALLBACK_DELAY_MS = 500;
 
 function requireAbsoluteExecutablePath(value: string, error: string): string {
   if (!value.startsWith("/") || value.includes("\0")) {
@@ -63,14 +65,20 @@ function authorizationLauncherFromOutput(output: string): string | undefined {
 
 function buildAuthorizationUrlValidator(): string {
   return [
-    "const isAuthorizationUrl=(raw)=>{",
-    'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))return false',
+    `const manualRedirectUri=${JSON.stringify(CLAUDE_MANUAL_REDIRECT_URI)}`,
+    "const isLoopbackRedirect=(raw)=>{const match=/^http:\\/\\/localhost:([1-9][0-9]{0,4})\\/callback$/.exec(raw);return !!match&&Number(match[1])<=65535}",
+    "const authorizationUrlKind=(raw)=>{",
+    'if(typeof raw!=="string"||/[\\u0000-\\u001f\\u007f]/.test(raw))return',
     "let url",
-    "try{url=new URL(raw)}catch{return false}",
-    'if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize")return false',
+    "try{url=new URL(raw)}catch{return}",
+    'if(url.protocol!=="https:"||url.hostname!=="claude.com"||url.port!==""||url.username!==""||url.password!==""||url.pathname!=="/cai/oauth/authorize")return',
     'const single=(name)=>{const values=url.searchParams.getAll(name);return values.length===1&&values[0]!==""?values[0]:undefined}',
-    `return single("response_type")==="code"&&!!single("client_id")&&single("redirect_uri")===${JSON.stringify(CLAUDE_MANUAL_REDIRECT_URI)}&&!!single("scope")&&!!single("state")&&!!single("code_challenge")&&single("code_challenge_method")==="S256"`,
+    'const redirectUri=single("redirect_uri")',
+    'if(single("response_type")!=="code"||!single("client_id")||!single("scope")||!single("state")||!single("code_challenge")||single("code_challenge_method")!=="S256")return',
+    'if(redirectUri===manualRedirectUri)return "manual"',
+    'if(isLoopbackRedirect(redirectUri))return "loopback"',
     "}",
+    "const isAuthorizationUrl=(raw)=>authorizationUrlKind(raw)!==undefined",
   ].join(";");
 }
 
@@ -82,34 +90,53 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     );
   }
 
-  const cleanupCapture =
-    '/bin/unlink "$claim" 2>/dev/null || true; /bin/unlink "$url_file" 2>/dev/null || true; /bin/unlink "$url_pending" 2>/dev/null || true';
+  const cleanupManualCapture =
+    '/bin/unlink "$claim" 2>/dev/null || true; /bin/unlink "$manual_file" 2>/dev/null || true; /bin/unlink "$manual_pending" 2>/dev/null || true';
+  const cleanupLoopbackCapture =
+    '/bin/unlink "$loopback_claim" 2>/dev/null || true; /bin/unlink "$loopback_file" 2>/dev/null || true; /bin/unlink "$loopback_pending" 2>/dev/null || true';
   const launch = (browser: string) => [
     `exec ${shellQuote(browser)} --incognito "$url" >/dev/null 2>&1`,
     `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
   ];
-  const validateUrl = `${buildAuthorizationUrlValidator()};if(!isAuthorizationUrl(process.argv[1]))process.exit(1)`;
+  const classifyUrl = `${buildAuthorizationUrlValidator()};const kind=authorizationUrlKind(process.argv[1]);if(!kind)process.exit(1);process.stdout.write(kind)`;
   const lines = [
     "#!/bin/sh",
     'claim="${0}.captured"',
-    'url_file="${0}.authorization-url"',
-    'url_pending="${0}.authorization-url.pending"',
+    'loopback_claim="${0}.loopback-captured"',
+    'loopback_file="${0}.loopback-url"',
+    'loopback_pending="${0}.loopback-url.pending"',
+    'manual_file="${0}.manual-url"',
+    'manual_pending="${0}.manual-url.pending"',
+    'write_url() { /usr/bin/printf \'%s\\n\' "$3" > "$2" && /bin/mv "$2" "$1"; }',
     "initial=false",
     `if test "\${1-}" = ${shellQuote(AUTHORIZATION_REOPEN_ARGUMENT)}; then`,
     `  test "$#" -eq 1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
-    `  test -r "$url_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
-    `  IFS= read -r url < "$url_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    '  if test -r "$loopback_file"; then',
+    `    IFS= read -r url < "$loopback_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    '  elif test -r "$manual_file"; then',
+    `    IFS= read -r url < "$manual_file" || exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    "  else",
+    `    exit ${AUTHORIZATION_NOT_READY_EXIT_CODE}`,
+    "  fi",
+    `elif test "\${1-}" = ${shellQuote(AUTHORIZATION_OPEN_ARGUMENT)}; then`,
+    `  test "$#" -eq 2 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    '  url="${2-}"',
     "else",
     `  test "$#" -eq 1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
     '  url="${1-}"',
     "  initial=true",
     "fi",
-    `command node -e ${shellQuote(validateUrl)} "$url" >/dev/null 2>&1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    `kind="$(command node -e ${shellQuote(classifyUrl)} "$url" 2>/dev/null)" || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    `test "$kind" = manual || test "$kind" = loopback || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
     'if test "$initial" = true; then',
-    '  (set -C; : > "$claim") 2>/dev/null || exit 0',
     "  umask 077",
-    `  /usr/bin/printf '%s\\n' "$url" > "$url_pending" || { ${cleanupCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
-    `  /bin/mv "$url_pending" "$url_file" || { ${cleanupCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    '  if test "$kind" = loopback; then',
+    '    (set -C; : > "$loopback_claim") 2>/dev/null || exit 0',
+    `    write_url "$loopback_file" "$loopback_pending" "$url" || { ${cleanupLoopbackCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    "    exit 0",
+    "  fi",
+    '  (set -C; : > "$claim") 2>/dev/null || exit 0',
+    `  write_url "$manual_file" "$manual_pending" "$url" || { ${cleanupManualCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
     "  exit 0",
     "fi",
   ];
@@ -156,31 +183,39 @@ function buildClaudeLoginObserver(): string {
     "const launcher=process.argv[2]",
     "const LF=String.fromCharCode(10)",
     "const CR=String.fromCharCode(13)",
-    'const authorizationFile=launcher+".authorization-url"',
+    `const fallbackDelayMs=${MANUAL_AUTHORIZATION_FALLBACK_DELAY_MS}`,
+    'const loopbackFile=launcher+".loopback-url"',
+    'const manualFile=launcher+".manual-url"',
     `const authorizationMarker=${JSON.stringify(LOGIN_AUTHORIZATION_READY_MARKER)}`,
     `const browserFailureMarker=${JSON.stringify(LOGIN_BROWSER_FAILED_MARKER)}`,
-    `const reopenArgument=${JSON.stringify(AUTHORIZATION_REOPEN_ARGUMENT)}`,
+    `const openArgument=${JSON.stringify(AUTHORIZATION_OPEN_ARGUMENT)}`,
     buildAuthorizationUrlValidator(),
     'const isUriLine=(value)=>value!==""&&Array.from(value).every((character)=>{const code=character.charCodeAt(0);return code>32&&code!==127&&character!=="\\\""&&character!=="<"&&character!==">"})',
     'const authorizationFrom=(value)=>{const clean=stripVTControlCharacters(value).split(CR).join("");const start=clean.lastIndexOf("https://claude.com/cai/oauth/authorize?");if(start<0)return;const lines=clean.slice(start).split(LF);if(lines.length<2)return;let candidate=lines[0].trim();for(let index=1;index<lines.length-1;index++){const part=lines[index].trim();if(!isUriLine(part))break;candidate+=part}return isAuthorizationUrl(candidate)?candidate:undefined}',
     'let tail=""',
+    "let fallbackAuthorizationUrl",
+    "let fallbackReadyAt=0",
     "let announced=false",
     "let captureStarted=false",
-    "let browserStarted=false",
-    "let browserSettled=false",
+    "const openedAuthorizationUrls=new Set()",
+    "let pendingBrowsers=0",
     "let launchFailed=false",
     "let claudeClosed=false",
     "let claudeExitCode=1",
     "let finishDeadline=0",
     "let timer",
-    "const announce=()=>{if(announced)return;try{fs.accessSync(authorizationFile,fs.constants.R_OK)}catch{return}announced=true;process.stdout.write(authorizationMarker+launcher+LF)}",
+    'const readAuthorization=(path)=>{try{const url=fs.readFileSync(path,"utf8").trim();return isAuthorizationUrl(url)?url:undefined}catch{return}}',
+    "const selectedAuthorization=()=>{try{fs.accessSync(loopbackFile,fs.constants.R_OK);return readAuthorization(loopbackFile)}catch{return readAuthorization(manualFile)}}",
+    "const announce=()=>{if(announced||!selectedAuthorization())return;announced=true;process.stdout.write(authorizationMarker+launcher+LF)}",
     'const signalExitCode=(signal)=>signal==="SIGHUP"?129:signal==="SIGINT"?130:signal==="SIGTERM"?143:1',
-    "const finish=()=>{launchBrowser();announce();if(!claudeClosed)return;if(((captureStarted&&!announced)||(browserStarted&&!browserSettled))&&!launchFailed&&Date.now()<finishDeadline)return;clearInterval(timer);process.exitCode=launchFailed?78:claudeExitCode}",
+    "const fallbackPending=()=>!!fallbackAuthorizationUrl&&!captureStarted&&!selectedAuthorization()&&Date.now()<fallbackReadyAt",
+    "const finish=()=>{captureFallback();launchBrowser();announce();if(!claudeClosed)return;if((fallbackPending()||(captureStarted&&!announced)||pendingBrowsers>0)&&!launchFailed&&Date.now()<finishDeadline)return;clearInterval(timer);process.exitCode=launchFailed?78:claudeExitCode}",
     "let child",
     'const failLaunch=()=>{if(launchFailed)return;launchFailed=true;process.stdout.write(browserFailureMarker+LF);if(!claudeClosed)child.kill("SIGTERM");finish()}',
-    'const launchBrowser=()=>{if(browserStarted)return;try{fs.accessSync(authorizationFile,fs.constants.R_OK)}catch{return}browserStarted=true;const browser=spawn(launcher,[reopenArgument],{detached:true,stdio:"ignore"});browser.unref();browser.once("error",failLaunch);browser.once("exit",(code)=>{browserSettled=true;if(code!==0)failLaunch();else finish()})}',
+    'const launchBrowser=()=>{const authorizationUrl=selectedAuthorization();if(!authorizationUrl||openedAuthorizationUrls.has(authorizationUrl))return;openedAuthorizationUrls.add(authorizationUrl);pendingBrowsers+=1;const browser=spawn(launcher,[openArgument,authorizationUrl],{detached:true,stdio:"ignore"});browser.unref();let settled=false;const settle=(failed)=>{if(settled)return;settled=true;pendingBrowsers-=1;if(failed)failLaunch();else finish()};browser.once("error",()=>settle(true));browser.once("exit",(code)=>settle(code!==0))}',
     'const captureAuthorization=(url)=>{captureStarted=true;const capture=spawn(launcher,[url],{detached:true,stdio:"ignore"});capture.unref();capture.once("error",failLaunch);capture.once("exit",(code)=>{if(code!==0)failLaunch();else finish()})}',
-    'const inspect=(chunk)=>{tail=(tail+chunk.toString("utf8")).slice(-131072);if(!captureStarted){const authorizationUrl=authorizationFrom(tail);if(authorizationUrl)captureAuthorization(authorizationUrl)}launchBrowser();announce()}',
+    "const captureFallback=()=>{if(captureStarted||!fallbackAuthorizationUrl||Date.now()<fallbackReadyAt||selectedAuthorization())return;captureAuthorization(fallbackAuthorizationUrl)}",
+    'const inspect=(chunk)=>{tail=(tail+chunk.toString("utf8")).slice(-131072);if(!fallbackAuthorizationUrl){const authorizationUrl=authorizationFrom(tail);if(authorizationUrl){fallbackAuthorizationUrl=authorizationUrl;fallbackReadyAt=Date.now()+fallbackDelayMs}}launchBrowser();announce()}',
     'child=spawn(executable,["auth","login","--claudeai"],{env:{...process.env,BROWSER:launcher},stdio:["inherit","pipe","pipe"]})',
     'child.stdout.on("data",inspect)',
     'child.stderr.on("data",inspect)',
@@ -209,9 +244,12 @@ export function buildClaudeLoginCommand(
     'browser_dir="$("$mktemp_command" -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
     'browser_launcher="$browser_dir/open-chrome-incognito"',
     'browser_claim="$browser_launcher.captured"',
-    'browser_authorization="$browser_launcher.authorization-url"',
-    'browser_authorization_pending="$browser_launcher.authorization-url.pending"',
-    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_authorization" 2>/dev/null || true; /bin/unlink "$browser_authorization_pending" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
+    'browser_loopback_claim="$browser_launcher.loopback-captured"',
+    'browser_loopback_file="$browser_launcher.loopback-url"',
+    'browser_loopback_pending="$browser_launcher.loopback-url.pending"',
+    'browser_manual_file="$browser_launcher.manual-url"',
+    'browser_manual_pending="$browser_launcher.manual-url.pending"',
+    `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_loopback_claim" 2>/dev/null || true; /bin/unlink "$browser_loopback_file" 2>/dev/null || true; /bin/unlink "$browser_loopback_pending" 2>/dev/null || true; /bin/unlink "$browser_manual_file" 2>/dev/null || true; /bin/unlink "$browser_manual_pending" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
     "trap cleanup_login EXIT",
     "trap 'exit 129' HUP",
     "trap 'exit 130' INT",
