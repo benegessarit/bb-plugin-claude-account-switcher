@@ -81,6 +81,8 @@ test("using the current login is the default and requires no email", async () =>
         name: "Switch Claude login for this session",
       }),
     );
+    expect(slot.queryByText(/Reuse the Claude subscription/i)).toBeNull();
+    expect(slot.queryByText(/Do not start another message/i)).toBeNull();
     expect(slot.queryByRole("textbox", { name: /email/i })).toBeNull();
     fireEvent.click(await slot.findByRole("button", { name: "Use current login" }));
 
@@ -251,7 +253,7 @@ test("a thread-busy admission reattaches to the server's exact operation", async
       });
     });
     expect(
-      await slot.findByText(/BB opens one automatic Chrome Incognito handoff/i),
+      await slot.findByText("Checking unfinished Claude login helpers…"),
     ).not.toBeNull();
   } finally {
     finishSwitch({ outcome: "cancelled" });
@@ -331,7 +333,7 @@ test("same-mode thread-busy reattachment keeps polling the exact operation", asy
   }
 });
 
-test("the browser handoff states only what BB and Incognito control", async () => {
+test("the browser handoff keeps only actionable controls and status", async () => {
   let acceptSwitch!: (result: { outcome: "accepted" }) => void;
   const admission = new Promise<{ outcome: "accepted" }>((resolve) => {
     acceptSwitch = resolve;
@@ -361,19 +363,13 @@ test("the browser handoff states only what BB and Incognito control", async () =
     ).toBeNull();
     acceptSwitch({ outcome: "accepted" });
     expect(
-      await slot.findByText(/BB opens one automatic Chrome Incognito handoff/i),
+      await slot.findByText("Checking unfinished Claude login helpers…"),
     ).not.toBeNull();
-    expect(
-      await slot.findByText(/does not use cookies from your normal windows/i),
-    ).not.toBeNull();
-    expect(
-      await slot.findByText(/Existing Incognito windows share one session/i),
-    ).not.toBeNull();
-    expect(
-      await slot.findByText(/may offer passwords from the active profile/i),
-    ).not.toBeNull();
-    expect(await slot.findByText(/BB never reads or copies them/i)).not.toBeNull();
-    expect(await slot.findByText(/Leave this dialog open/i)).not.toBeNull();
+    expect(slot.queryByText(/automatic Chrome Incognito handoff/i)).toBeNull();
+    expect(slot.queryByText(/cookies from your normal windows/i)).toBeNull();
+    expect(slot.queryByText(/Existing Incognito windows/i)).toBeNull();
+    expect(slot.queryByText(/may offer passwords/i)).toBeNull();
+    expect(slot.queryByText(/Leave this dialog open/i)).toBeNull();
     expect(slot.queryByText(/one Chrome Incognito window/i)).toBeNull();
     expect(slot.queryByText(/email to prefill/i)).toBeNull();
     expect(slot.queryByRole("textbox", { name: /email/i })).toBeNull();
@@ -440,7 +436,6 @@ test("authorization return appears only when armed and reopens the same operatio
         await slot.findByRole("button", { name: "Opening authorization…" })
       ).getAttribute("aria-busy"),
     ).toBe("true");
-    expect(await slot.findByText(/keep that Incognito window open/i)).not.toBeNull();
     expect(reopenAuthorization).toHaveBeenCalledWith({
       operationId: OPERATION_ID,
       threadId: "thread_1",

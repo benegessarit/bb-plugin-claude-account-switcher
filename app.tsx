@@ -39,10 +39,7 @@ function admissionFailureMessage(
     | {
         readonly outcome: "thread-not-ready";
         readonly reason:
-          | "machine-unavailable"
-          | "not-claude"
-          | "thread-not-idle"
-          | "thread-not-ready";
+          "machine-unavailable" | "not-claude" | "thread-not-idle" | "thread-not-ready";
       },
 ): string {
   if (admission.outcome === "host-busy") {
@@ -435,15 +432,8 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Switch Claude login</DialogTitle>
-          <DialogDescription className="space-y-2">
-            <span className="block">
-              Reuse the Claude subscription already signed in on this machine, then ask
-              BB to release this session&apos;s loaded runtime.
-            </span>
-            <span className="block">
-              Do not start another message until this finishes. Claude sign-in is
-              machine-wide; other sessions use it after their own runtime is released.
-            </span>
+          <DialogDescription className="sr-only">
+            Choose which Claude login this session should use.
           </DialogDescription>
         </DialogHeader>
 
@@ -482,42 +472,25 @@ function SwitchClaudeAccountAction({ threadId }: { threadId: string }) {
 
           {switchingMode === "login" && activeStep !== "admitting" && (
             <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
-              <p className="text-sm text-muted-foreground">
-                BB opens one automatic Chrome Incognito handoff for this switch. It does
-                not use cookies from your normal windows. Existing Incognito windows
-                share one session, so close them first if you need a fresh Claude
-                sign-in.
-              </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Icon name="Loading" className="animate-spin" aria-hidden="true" />
                 <span>{progressMessage(activeStep, activePhase)}</span>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Choose the account there. Chrome may offer passwords from the active
-                profile; BB never reads or copies them. Leave this dialog open until
-                Claude Code confirms the login.
-              </p>
               {activeStep === "login" &&
                 switchPhase === "cancellable" &&
                 (canReturnToAuthorization || returningToAuthorization) && (
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">
-                      If switching accounts lands on Claude&apos;s home page, keep that
-                      Incognito window open and return here.
-                    </p>
-                    <Button
-                      aria-busy={returningToAuthorization || undefined}
-                      className="w-full"
-                      disabled={returningToAuthorization || submittingCode}
-                      onClick={() => void returnToAuthorization()}
-                      size="sm"
-                      variant="outline"
-                    >
-                      {returningToAuthorization
-                        ? "Opening authorization…"
-                        : "Return to authorization"}
-                    </Button>
-                  </div>
+                  <Button
+                    aria-busy={returningToAuthorization || undefined}
+                    className="w-full"
+                    disabled={returningToAuthorization || submittingCode}
+                    onClick={() => void returnToAuthorization()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    {returningToAuthorization
+                      ? "Opening authorization…"
+                      : "Return to authorization"}
+                  </Button>
                 )}
               {activeStep === "login" &&
               switchPhase === "cancellable" &&
