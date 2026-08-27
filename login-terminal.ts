@@ -1,3 +1,5 @@
+import { gzipSync } from "node:zlib";
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
@@ -10,6 +12,7 @@ const AUTHORIZATION_REOPEN_ARGUMENT = "--bb-reopen-authorization";
 const AUTHORIZATION_OPEN_ARGUMENT = "--bb-open-authorization";
 const AUTHORIZATION_NOT_READY_EXIT_CODE = 75;
 const AUTHORIZATION_HELPER_ERROR_EXIT_CODE = 78;
+const BB_TERMINAL_COMMAND_MAX_CHARACTERS = 10_000;
 const CLAUDE_MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const MANUAL_AUTHORIZATION_FALLBACK_DELAY_MS = 500;
 
@@ -260,7 +263,18 @@ export function buildClaudeLoginCommand(
     `printf '%s%s\\n' ${shellQuote("BB_CLAUDE_LOGIN_")} ${shellQuote("INPUT_READY")}`,
     `command node -e ${shellQuote(loginObserver)} ${shellQuote(executable)} "$browser_launcher"`,
   ].join("; ");
-  return `/bin/sh -c ${shellQuote(script)}`;
+  const compressedScript = gzipSync(script, { level: 9 }).toString("base64");
+  const decoder =
+    'process.stdout.write(require("node:zlib").gunzipSync(Buffer.from(process.argv[1],"base64")))';
+  const bootstrap = [
+    `decoded_script="$(command node -e ${shellQuote(decoder)} ${shellQuote(compressedScript)})" || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
+    'exec /bin/sh -c "$decoded_script"',
+  ].join("; ");
+  const command = `/bin/sh -c ${shellQuote(bootstrap)}`;
+  if (command.length > BB_TERMINAL_COMMAND_MAX_CHARACTERS) {
+    throw new Error("The Claude login helper exceeded BB's terminal command limit.");
+  }
+  return command;
 }
 
 export function buildClaudeAuthorizationReopenCommand(launcherPath: string): string {

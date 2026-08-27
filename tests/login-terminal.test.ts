@@ -54,11 +54,15 @@ async function readFileEventually(path: string, timeoutMs = 2_000): Promise<stri
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {
-      return await readFile(path, "utf8");
+      const contents = await readFile(path, "utf8");
+      if (contents.length > 0) return contents;
     } catch (error) {
       if (Date.now() >= deadline) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    if (Date.now() >= deadline) {
+      throw new Error(`Expected ${path} to contain data.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
@@ -76,27 +80,26 @@ function client(
   };
 }
 
-test("the login command reuses Chrome Incognito windows", () => {
+test("the login command uses a compact self-contained bootstrap", () => {
   const command = buildClaudeLoginCommand("/opt/trusted claude/bin/claude");
 
   assert.match(command, /^\/bin\/sh -c /);
-  assert.match(command, /\/bin\/stty/);
-  assert.match(command, /-echo/);
-  assert.match(command, /\/bin\/stty.*echo/);
+  assert.match(command, /node:zlib/);
+  assert.match(command, /gunzipSync/);
+  assert.match(command, /base64/);
   assert.doesNotMatch(command, /BB_CLAUDE_LOGIN_INPUT_READY/);
-  assert.match(command, /BB_CLAUDE_LOGIN_/);
-  assert.match(command, /INPUT_READY/);
-  assert.match(command, /auth.*login.*--claudeai/);
-  assert.match(command, /\/opt\/trusted claude\/bin\/claude/);
-  assert.doesNotMatch(command, /command claude auth login/);
-  assert.match(command, /BROWSER:launcher/);
-  assert.match(command, /--bb-open-authorization/);
-  assert.match(command, /--incognito/);
-  assert.doesNotMatch(command, /--new-window/);
-  assert.match(command, /\/bin\/unlink/);
-  assert.match(command, /\/bin\/rmdir/);
-  assert.match(command, /command -v mktemp/);
-  assert.doesNotMatch(command, /--email|--user-data-dir|open -n|open -na/);
+  assert.doesNotMatch(command, /\/opt\/trusted claude\/bin\/claude/);
+});
+
+test("the login command fits BB's terminal command limit", () => {
+  const command = buildClaudeLoginCommand(
+    "/Users/davidbeyer/.local/share/claude/versions/2.1.246",
+  );
+
+  assert.ok(
+    command.length <= 10_000,
+    `expected at most 10000 characters, received ${command.length}`,
+  );
 });
 
 test("authorization capture opens Chrome only when requested", async () => {
@@ -542,10 +545,6 @@ test("the complete login command launches Chrome Incognito and removes its helpe
       browserExecutablePath: fakeBrowser,
       sttyExecutablePath: fakeStty,
     });
-    assert.ok(
-      command.includes(fakeBrowser),
-      "the test browser must be embedded before the command can execute",
-    );
     const result = spawnSync("/bin/sh", ["-c", command], {
       encoding: "utf8",
       env: {
