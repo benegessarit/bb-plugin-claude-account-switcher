@@ -72,7 +72,7 @@ function client(
   };
 }
 
-test("the login command routes authorization through Chrome Incognito", () => {
+test("the login command reuses Chrome Incognito windows", () => {
   const command = buildClaudeLoginCommand("/opt/trusted claude/bin/claude");
 
   assert.match(command, /^\/bin\/sh -c /);
@@ -87,7 +87,7 @@ test("the login command routes authorization through Chrome Incognito", () => {
   assert.doesNotMatch(command, /command claude auth login/);
   assert.match(command, /BROWSER:launcher/);
   assert.match(command, /--incognito/);
-  assert.match(command, /--new-window/);
+  assert.doesNotMatch(command, /--new-window/);
   assert.match(command, /\/bin\/unlink/);
   assert.match(command, /\/bin\/rmdir/);
   assert.match(command, /command -v mktemp/);
@@ -126,7 +126,6 @@ test("authorization capture opens Chrome only when requested", async () => {
     assert.equal(open.status, 0, open.stderr);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
     assert.equal(
@@ -179,7 +178,6 @@ test("explicit authorization reopen uses the saved URL without consuming another
 
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
   } finally {
@@ -342,10 +340,8 @@ test("authorization reopen can retry after the browser command fails", async () 
     assert.equal(second.status, 0, second.stderr);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
   } finally {
@@ -434,7 +430,6 @@ test("the complete login command launches Chrome Incognito and removes its helpe
     assert.doesNotMatch(result.stdout, /https:\/\//);
     assert.deepEqual((await readFile(browserArgs, "utf8")).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
     assert.equal(
@@ -496,7 +491,6 @@ test("the login command opens Claude's printed fallback URL when BROWSER is not 
     assert.doesNotMatch(result.stdout, /https:\/\//);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
   } finally {
@@ -504,7 +498,7 @@ test("the login command opens Claude's printed fallback URL when BROWSER is not 
   }
 });
 
-test("the login command still opens only one window when Claude also prints the URL", async () => {
+test("the login command still makes only one browser request when Claude also prints the URL", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-deduped-"));
   const fakeClaude = join(fixtureRoot, "claude");
   const fakeBrowser = join(fixtureRoot, "chrome");
@@ -553,7 +547,6 @@ test("the login command still opens only one window when Claude also prints the 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
     assert.equal(
@@ -695,7 +688,6 @@ test("the login fallback waits for a complete ANSI-wrapped URL", async () => {
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
-      "--new-window",
       VALID_OAUTH_URL,
     ]);
     assert.doesNotMatch(result.stdout, /https:\/\//);

@@ -606,7 +606,7 @@ test("authorization code delivery is gated, serialized, and retry-safe", async (
     const loginCommand = loginRequest.start?.command ?? "";
     assert.match(loginCommand, /BROWSER:launcher/);
     assert.match(loginCommand, /--incognito/);
-    assert.match(loginCommand, /--new-window/);
+    assert.doesNotMatch(loginCommand, /--new-window/);
     assert.doesNotMatch(loginCommand, /--email|--user-data-dir|open -n|open -na/);
     await assert.rejects(
       host.harness.behavior.callRpc("submitLoginCode", {

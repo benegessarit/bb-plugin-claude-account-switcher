@@ -85,7 +85,7 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
   const cleanupCapture =
     '/bin/unlink "$claim" 2>/dev/null || true; /bin/unlink "$url_file" 2>/dev/null || true; /bin/unlink "$url_pending" 2>/dev/null || true';
   const launch = (browser: string) => [
-    `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`,
+    `exec ${shellQuote(browser)} --incognito "$url" >/dev/null 2>&1`,
     `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
   ];
   const validateUrl = `${buildAuthorizationUrlValidator()};if(!isAuthorizationUrl(process.argv[1]))process.exit(1)`;
@@ -126,13 +126,13 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
   if (!browserExecutablePath) {
     lines.push(
       'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
-      '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
+      '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito "$url" >/dev/null 2>&1',
       `  exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "fi",
       "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
       '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
       '  if test -n "$browser_path"; then',
-      '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
+      '    exec "$browser_path" --incognito "$url" >/dev/null 2>&1',
       `    exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "  fi",
       "done",
