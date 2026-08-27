@@ -94,8 +94,8 @@ test("the login command routes authorization through Chrome Incognito", () => {
   assert.doesNotMatch(command, /--email|--user-data-dir|open -n|open -na/);
 });
 
-test("the Incognito launcher invokes one browser executable without a profile override", async () => {
-  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-"));
+test("authorization capture opens Chrome only when requested", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login."));
   const fakeBrowser = join(fixtureRoot, "chrome");
   const browserArgs = join(fixtureRoot, "browser-args");
   const launcherPath = join(fixtureRoot, "open-chrome-incognito");
@@ -110,12 +110,20 @@ test("the Incognito launcher invokes one browser executable without a profile ov
   try {
     await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
     await chmod(launcherPath, 0o700);
-    const result = spawnSync(launcherPath, [VALID_OAUTH_URL], {
+    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
+    const capture = spawnSync(launcherPath, [VALID_OAUTH_URL], {
       encoding: "utf8",
-      env: { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs },
+      env,
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(capture.status, 0, capture.stderr);
+    await assert.rejects(access(browserArgs));
+    const open = spawnSync(
+      "/bin/sh",
+      ["-c", buildClaudeAuthorizationReopenCommand(launcherPath)],
+      { encoding: "utf8", env },
+    );
+    assert.equal(open.status, 0, open.stderr);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
@@ -170,9 +178,6 @@ test("explicit authorization reopen uses the saved URL without consuming another
     );
 
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
-      "--incognito",
-      "--new-window",
-      VALID_OAUTH_URL,
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -250,20 +255,62 @@ test("the Incognito launcher rejects HTTPS URLs outside Claude consent", async (
   }
 });
 
-test("concurrent Incognito callbacks invoke the browser at most once", async () => {
+test("concurrent authorization callbacks capture one URL without opening Chrome", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-once-"));
   const fakeBrowser = join(fixtureRoot, "chrome");
   const browserArgs = join(fixtureRoot, "browser-args");
-  const browserStarted = join(fixtureRoot, "browser-started");
-  const releaseBrowser = join(fixtureRoot, "release-browser");
   const launcherPath = join(fixtureRoot, "open-chrome-incognito");
   await writeFile(
     fakeBrowser,
     [
       "#!/bin/sh",
       '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"',
-      ': > "$BB_SWITCH_BROWSER_STARTED"',
-      'while test ! -f "$BB_SWITCH_BROWSER_RELEASE"; do /bin/sleep 0.01; done',
+      "exit 99",
+    ].join("\n"),
+  );
+  await chmod(fakeBrowser, 0o755);
+
+  try {
+    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
+    await chmod(launcherPath, 0o700);
+    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
+    const capture = () =>
+      new Promise<number | null>((resolve, reject) => {
+        const child = spawn(launcherPath, [VALID_OAUTH_URL], {
+          env,
+          stdio: "ignore",
+        });
+        child.once("error", reject);
+        child.once("exit", resolve);
+      });
+
+    assert.deepEqual(await Promise.all([capture(), capture()]), [0, 0]);
+    assert.equal(
+      (await readFile(`${launcherPath}.authorization-url`, "utf8")).trim(),
+      VALID_OAUTH_URL,
+    );
+    await assert.rejects(access(browserArgs));
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
+test("authorization reopen can retry after the browser command fails", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login."));
+  const fakeBrowser = join(fixtureRoot, "chrome");
+  const browserArgs = join(fixtureRoot, "browser-args");
+  const failedOnce = join(fixtureRoot, "failed-once");
+  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
+  await writeFile(
+    fakeBrowser,
+    [
+      "#!/bin/sh",
+      '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"',
+      'if test ! -f "$BB_SWITCH_BROWSER_FAILED_ONCE"; then',
+      '  : > "$BB_SWITCH_BROWSER_FAILED_ONCE"',
+      "  exit 42",
+      "fi",
+      "exit 0",
     ].join("\n"),
   );
   await chmod(fakeBrowser, 0o755);
@@ -274,74 +321,29 @@ test("concurrent Incognito callbacks invoke the browser at most once", async () 
     const env = {
       ...process.env,
       BB_SWITCH_BROWSER_ARGS: browserArgs,
-      BB_SWITCH_BROWSER_RELEASE: releaseBrowser,
-      BB_SWITCH_BROWSER_STARTED: browserStarted,
+      BB_SWITCH_BROWSER_FAILED_ONCE: failedOnce,
     };
-    const first = spawn(launcherPath, [VALID_OAUTH_URL], {
+    const capture = spawnSync(launcherPath, [VALID_OAUTH_URL], {
+      encoding: "utf8",
       env,
-      stdio: "ignore",
     });
-    const firstExit = new Promise<number | null>((resolve) => {
-      first.once("exit", resolve);
+    const reopenCommand = buildClaudeAuthorizationReopenCommand(launcherPath);
+    const first = spawnSync("/bin/sh", ["-c", reopenCommand], {
+      encoding: "utf8",
+      env,
     });
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        await access(browserStarted);
-        break;
-      } catch {
-        if (attempt === 99) throw new Error("Fake browser did not start.");
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    const second = spawnSync(launcherPath, [SECOND_VALID_OAUTH_URL], {
+    const second = spawnSync("/bin/sh", ["-c", reopenCommand], {
       encoding: "utf8",
       env,
     });
 
+    assert.equal(capture.status, 0, capture.stderr);
+    assert.equal(first.status, 42, first.stderr);
     assert.equal(second.status, 0, second.stderr);
-    await writeFile(releaseBrowser, "release\n");
-    assert.equal(await firstExit, 0);
     assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
-    ]);
-  } finally {
-    await rm(fixtureRoot, { force: true, recursive: true });
-  }
-});
-
-test("the Incognito launcher does not retry after the browser command fails", async () => {
-  const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-incognito-fail-"));
-  const fakeBrowser = join(fixtureRoot, "chrome");
-  const browserArgs = join(fixtureRoot, "browser-args");
-  const launcherPath = join(fixtureRoot, "open-chrome-incognito");
-  await writeFile(
-    fakeBrowser,
-    [
-      "#!/bin/sh",
-      '/usr/bin/printf \'%s\\n\' "$@" >> "$BB_SWITCH_BROWSER_ARGS"',
-      "exit 42",
-    ].join("\n"),
-  );
-  await chmod(fakeBrowser, 0o755);
-
-  try {
-    await writeFile(launcherPath, buildChromeIncognitoLauncher(fakeBrowser));
-    await chmod(launcherPath, 0o700);
-    const env = { ...process.env, BB_SWITCH_BROWSER_ARGS: browserArgs };
-    const first = spawnSync(launcherPath, [VALID_OAUTH_URL], {
-      encoding: "utf8",
-      env,
-    });
-    const second = spawnSync(launcherPath, [SECOND_VALID_OAUTH_URL], {
-      encoding: "utf8",
-      env,
-    });
-
-    assert.equal(first.status, 42, first.stderr);
-    assert.equal(second.status, 0, second.stderr);
-    assert.deepEqual((await readFileEventually(browserArgs)).trim().split("\n"), [
       "--incognito",
       "--new-window",
       VALID_OAUTH_URL,
@@ -874,20 +876,29 @@ test("cancelling login does not wait for a long-lived fallback browser", async (
   }
 });
 
-test("a failed fallback browser launch stops with a safe error", async () => {
+test("a failed Claude browser callback stops with a safe error", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "bb-claude-login-browser-error-"));
   const fakeClaude = join(fixtureRoot, "claude");
   const fakeBrowser = join(fixtureRoot, "chrome");
   const fakeStty = join(fixtureRoot, "stty");
+  const browserCalls = join(fixtureRoot, "browser-calls");
   await writeFile(
     fakeClaude,
     [
       "#!/bin/sh",
+      `"$BROWSER" ${JSON.stringify(VALID_OAUTH_URL)}`,
       `/usr/bin/printf '%s\\n' ${JSON.stringify(VALID_OAUTH_URL)}`,
       "exec /bin/sleep 30",
     ].join("\n"),
   );
-  await writeFile(fakeBrowser, ["#!/bin/sh", "exit 42"].join("\n"));
+  await writeFile(
+    fakeBrowser,
+    [
+      "#!/bin/sh",
+      "/usr/bin/printf 'called\\n' >> \"$BB_SWITCH_BROWSER_CALLS\"",
+      "exit 42",
+    ].join("\n"),
+  );
   await writeFile(fakeStty, ["#!/bin/sh", "exit 0"].join("\n"));
   await chmod(fakeClaude, 0o755);
   await chmod(fakeBrowser, 0o755);
@@ -904,7 +915,11 @@ test("a failed fallback browser launch stops with a safe error", async () => {
     ],
     {
       detached: true,
-      env: { ...process.env, TMPDIR: fixtureRoot },
+      env: {
+        ...process.env,
+        BB_SWITCH_BROWSER_CALLS: browserCalls,
+        TMPDIR: fixtureRoot,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -929,6 +944,7 @@ test("a failed fallback browser launch stops with a safe error", async () => {
     assert.equal(exitCode, 78);
     assert.match(stdout, /BB_CLAUDE_LOGIN_BROWSER_FAILED/);
     assert.doesNotMatch(stdout, /https:\/\//);
+    assert.equal((await readFile(browserCalls, "utf8")).trim(), "called");
   } finally {
     if (child.exitCode === null) {
       try {

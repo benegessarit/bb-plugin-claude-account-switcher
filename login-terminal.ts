@@ -82,17 +82,16 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     );
   }
 
-  const cleanupInitial =
+  const cleanupCapture =
     '/bin/unlink "$claim" 2>/dev/null || true; /bin/unlink "$url_file" 2>/dev/null || true; /bin/unlink "$url_pending" 2>/dev/null || true';
   const launch = (browser: string) => [
     `exec ${shellQuote(browser)} --incognito --new-window "$url" >/dev/null 2>&1`,
-    `if test "$initial" = true; then ${cleanupInitial}; fi`,
     `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
   ];
   const validateUrl = `${buildAuthorizationUrlValidator()};if(!isAuthorizationUrl(process.argv[1]))process.exit(1)`;
   const lines = [
     "#!/bin/sh",
-    'claim="${0}.opened"',
+    'claim="${0}.captured"',
     'url_file="${0}.authorization-url"',
     'url_pending="${0}.authorization-url.pending"',
     "initial=false",
@@ -104,13 +103,14 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     `  test "$#" -eq 1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
     '  url="${1-}"',
     "  initial=true",
-    '  (set -C; : > "$claim") 2>/dev/null || exit 0',
     "fi",
-    `command node -e ${shellQuote(validateUrl)} "$url" >/dev/null 2>&1 || { test "$initial" = true && /bin/unlink "$claim" 2>/dev/null || true; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    `command node -e ${shellQuote(validateUrl)} "$url" >/dev/null 2>&1 || exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
     'if test "$initial" = true; then',
+    '  (set -C; : > "$claim") 2>/dev/null || exit 0',
     "  umask 077",
-    `  /usr/bin/printf '%s\\n' "$url" > "$url_pending" || { ${cleanupInitial}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
-    `  /bin/mv "$url_pending" "$url_file" || { ${cleanupInitial}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    `  /usr/bin/printf '%s\\n' "$url" > "$url_pending" || { ${cleanupCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    `  /bin/mv "$url_pending" "$url_file" || { ${cleanupCapture}; exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}; }`,
+    "  exit 0",
     "fi",
   ];
   const fixedBrowserPaths = browserExecutablePath
@@ -127,23 +127,18 @@ export function buildChromeIncognitoLauncher(browserExecutablePath?: string): st
     lines.push(
       'if test -n "${HOME:-}" && test -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; then',
       '  exec "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --incognito --new-window "$url" >/dev/null 2>&1',
-      `  if test "$initial" = true; then ${cleanupInitial}; fi`,
       `  exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "fi",
       "for browser_name in google-chrome-stable google-chrome chromium chromium-browser; do",
       '  browser_path="$(command -v "$browser_name" 2>/dev/null || true)"',
       '  if test -n "$browser_path"; then',
       '    exec "$browser_path" --incognito --new-window "$url" >/dev/null 2>&1',
-      `    if test "$initial" = true; then ${cleanupInitial}; fi`,
       `    exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
       "  fi",
       "done",
     );
   }
-  lines.push(
-    `if test "$initial" = true; then ${cleanupInitial}; fi`,
-    `exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`,
-  );
+  lines.push(`exit ${AUTHORIZATION_HELPER_ERROR_EXIT_CODE}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -164,12 +159,15 @@ function buildClaudeLoginObserver(): string {
     'const authorizationFile=launcher+".authorization-url"',
     `const authorizationMarker=${JSON.stringify(LOGIN_AUTHORIZATION_READY_MARKER)}`,
     `const browserFailureMarker=${JSON.stringify(LOGIN_BROWSER_FAILED_MARKER)}`,
+    `const reopenArgument=${JSON.stringify(AUTHORIZATION_REOPEN_ARGUMENT)}`,
     buildAuthorizationUrlValidator(),
     'const isUriLine=(value)=>value!==""&&Array.from(value).every((character)=>{const code=character.charCodeAt(0);return code>32&&code!==127&&character!=="\\\""&&character!=="<"&&character!==">"})',
     'const authorizationFrom=(value)=>{const clean=stripVTControlCharacters(value).split(CR).join("");const start=clean.lastIndexOf("https://claude.com/cai/oauth/authorize?");if(start<0)return;const lines=clean.slice(start).split(LF);if(lines.length<2)return;let candidate=lines[0].trim();for(let index=1;index<lines.length-1;index++){const part=lines[index].trim();if(!isUriLine(part))break;candidate+=part}return isAuthorizationUrl(candidate)?candidate:undefined}',
     'let tail=""',
     "let announced=false",
-    "let fallbackStarted=false",
+    "let captureStarted=false",
+    "let browserStarted=false",
+    "let browserSettled=false",
     "let launchFailed=false",
     "let claudeClosed=false",
     "let claudeExitCode=1",
@@ -177,15 +175,16 @@ function buildClaudeLoginObserver(): string {
     "let timer",
     "const announce=()=>{if(announced)return;try{fs.accessSync(authorizationFile,fs.constants.R_OK)}catch{return}announced=true;process.stdout.write(authorizationMarker+launcher+LF)}",
     'const signalExitCode=(signal)=>signal==="SIGHUP"?129:signal==="SIGINT"?130:signal==="SIGTERM"?143:1',
-    "const finish=()=>{announce();if(!claudeClosed)return;if(fallbackStarted&&!announced&&!launchFailed&&Date.now()<finishDeadline)return;clearInterval(timer);process.exitCode=launchFailed?78:claudeExitCode}",
+    "const finish=()=>{launchBrowser();announce();if(!claudeClosed)return;if(((captureStarted&&!announced)||(browserStarted&&!browserSettled))&&!launchFailed&&Date.now()<finishDeadline)return;clearInterval(timer);process.exitCode=launchFailed?78:claudeExitCode}",
     "let child",
     'const failLaunch=()=>{if(launchFailed)return;launchFailed=true;process.stdout.write(browserFailureMarker+LF);if(!claudeClosed)child.kill("SIGTERM");finish()}',
-    'const launchFallback=(url)=>{fallbackStarted=true;const fallback=spawn(launcher,[url],{detached:true,stdio:"ignore"});fallback.unref();fallback.once("error",failLaunch);fallback.once("exit",(code)=>{if(code!==0)failLaunch()})}',
-    'const inspect=(chunk)=>{tail=(tail+chunk.toString("utf8")).slice(-131072);if(!fallbackStarted){const authorizationUrl=authorizationFrom(tail);if(authorizationUrl)launchFallback(authorizationUrl)}announce()}',
+    'const launchBrowser=()=>{if(browserStarted)return;try{fs.accessSync(authorizationFile,fs.constants.R_OK)}catch{return}browserStarted=true;const browser=spawn(launcher,[reopenArgument],{detached:true,stdio:"ignore"});browser.unref();browser.once("error",failLaunch);browser.once("exit",(code)=>{browserSettled=true;if(code!==0)failLaunch();else finish()})}',
+    'const captureAuthorization=(url)=>{captureStarted=true;const capture=spawn(launcher,[url],{detached:true,stdio:"ignore"});capture.unref();capture.once("error",failLaunch);capture.once("exit",(code)=>{if(code!==0)failLaunch();else finish()})}',
+    'const inspect=(chunk)=>{tail=(tail+chunk.toString("utf8")).slice(-131072);if(!captureStarted){const authorizationUrl=authorizationFrom(tail);if(authorizationUrl)captureAuthorization(authorizationUrl)}launchBrowser();announce()}',
     'child=spawn(executable,["auth","login","--claudeai"],{env:{...process.env,BROWSER:launcher},stdio:["inherit","pipe","pipe"]})',
     'child.stdout.on("data",inspect)',
     'child.stderr.on("data",inspect)',
-    "timer=setInterval(()=>{announce();finish()},50)",
+    "timer=setInterval(finish,50)",
     'child.once("error",()=>{claudeClosed=true;claudeExitCode=78;finishDeadline=0;finish()})',
     'child.once("close",(code,signal)=>{claudeClosed=true;claudeExitCode=code??signalExitCode(signal);finishDeadline=Date.now()+1000;finish()})',
   ].join(";");
@@ -209,7 +208,7 @@ export function buildClaudeLoginCommand(
     'test -n "$mktemp_command" || exit 78',
     'browser_dir="$("$mktemp_command" -d "${TMPDIR:-/tmp}/bb-claude-login.XXXXXX")" || exit 78',
     'browser_launcher="$browser_dir/open-chrome-incognito"',
-    'browser_claim="$browser_launcher.opened"',
+    'browser_claim="$browser_launcher.captured"',
     'browser_authorization="$browser_launcher.authorization-url"',
     'browser_authorization_pending="$browser_launcher.authorization-url.pending"',
     `cleanup_login() { ${shellQuote(sttyExecutable)} echo >/dev/null 2>&1 || true; /bin/unlink "$browser_claim" 2>/dev/null || true; /bin/unlink "$browser_authorization" 2>/dev/null || true; /bin/unlink "$browser_authorization_pending" 2>/dev/null || true; /bin/unlink "$browser_launcher" 2>/dev/null || true; /bin/rmdir "$browser_dir" 2>/dev/null || true; }`,
