@@ -2,7 +2,7 @@ agent = "codex"
 review_agent = "codex"
 refine_agent = "codex"
 model = "gpt-5.6-sol"
-display_name = "Claude Session Login for BB"
+display_name = "Claude Account Switcher for BB"
 review_context_count = 0
 post_commit_review = "commit"
 review_reasoning = "maximum"
@@ -36,7 +36,7 @@ exclude_patterns = [
 ]
 
 review_guidelines = """
-This local BB plugin releases a selected Claude Code runtime after verifying Claude.ai authentication on the exact machine.
+This BB plugin releases a selected Claude Code runtime after verifying Claude.ai authentication on the exact machine.
 Prioritize incorrect state transitions, active-session interruption, cancellation races, credential or terminal-output exposure, host-lock leaks, unsafe helper cleanup, and tests that do not exercise the public plugin contract.
-Do not report style-only findings, speculative architecture, or requests for remote CI or publication in this local-only tool.
+Do not report style-only findings, speculative architecture, or publication suggestions without a concrete correctness, security, packaging, or reviewability defect.
 """

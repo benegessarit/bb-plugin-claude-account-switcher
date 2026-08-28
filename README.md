@@ -1,6 +1,8 @@
-# Claude Session Login for BB
+# Claude Account Switcher for BB
 
 Switch the machine-wide Claude subscription used by one BB Claude Code session without restarting BB. The plugin preserves the thread and its history. The next message starts a fresh Claude Code runtime with the verified login.
+
+This is a thread-level session tool, not a general Claude credential manager. It changes Claude Code's machine-wide login, verifies the subscription, and releases only the selected BB session's loaded runtime.
 
 The session header button has two paths:
 
@@ -21,7 +23,13 @@ The session header button has two paths:
 
 ## Install
 
-From a local checkout:
+After the public repository and `v0.1.0` tag exist, install the supported release range:
+
+```sh
+bb plugin install "git:https://github.com/benegessarit/bb-plugin-claude-account-switcher.git@semver:^0.1.0"
+```
+
+For local development, install from a checkout:
 
 ```sh
 npm ci
@@ -30,6 +38,10 @@ bb plugin install .
 ```
 
 Disable or remove it with `bb plugin disable claude-account-switcher` or `bb plugin remove claude-account-switcher`.
+
+## Reporting problems
+
+Use [GitHub Issues](https://github.com/benegessarit/bb-plugin-claude-account-switcher/issues) for reproducible bugs. For a security problem, open a non-sensitive issue asking for a private reporting channel. Never include OAuth codes, credentials, raw authentication output, vulnerability details, or private account details in a public report.
 
 ## Use
 
@@ -74,17 +86,13 @@ away does not.
 
 ```sh
 npm ci
-npm run format:check
-npm run typecheck
-npm test
-npm run build
-bb plugin types --check .
-npm pack --dry-run
+npm run check
 ```
 
-`npm test` activates both the source app and the generated app bundle. `dist/` is
-generated and ignored by Git. `npm pack` rebuilds it and includes only the
-distributable bundle declared by `package.json`.
+`npm run check` verifies formatting and types, activates both the source app and
+the generated app bundle, checks the installed BB SDK contract, rebuilds
+`dist/`, and inspects the package contents. `dist/` is generated and ignored by
+Git.
 
 Reload a locally installed checkout after successful checks:
 

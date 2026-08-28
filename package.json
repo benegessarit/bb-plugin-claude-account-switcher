@@ -2,6 +2,18 @@
   "name": "bb-plugin-claude-account-switcher",
   "version": "0.1.0",
   "description": "Switch the machine-wide Claude subscription used by one BB Claude Code session without restarting BB.",
+  "author": {
+    "name": "David Beyer",
+    "url": "https://github.com/benegessarit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benegessarit/bb-plugin-claude-account-switcher.git"
+  },
+  "homepage": "https://github.com/benegessarit/bb-plugin-claude-account-switcher#readme",
+  "bugs": {
+    "url": "https://github.com/benegessarit/bb-plugin-claude-account-switcher/issues"
+  },
   "files": [
     "dist"
   ],
@@ -12,6 +24,7 @@
   ],
   "type": "module",
   "engines": {
+    "node": "^22.19.0 || ^24.0.0 || ^26.0.0",
     "bb": ">=0.38",
     "bbPluginSdk": ">=0.4.11"
   },
@@ -30,6 +43,7 @@
   },
   "scripts": {
     "build": "bb plugin build",
+    "check": "npm run format:check && npm run typecheck && npm test && bb plugin types --check . && npm pack --dry-run",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
     "prepack": "npm run build",
@@ -55,6 +69,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "better-sqlite3": "^12.11.1",
+    "bb-app": "0.39.0",
     "cron-parser": "^5.10.0",
     "hono": "^4.13.2",
     "jsdom": "^30.0.1",

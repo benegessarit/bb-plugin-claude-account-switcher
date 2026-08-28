@@ -39,7 +39,10 @@ function admissionFailureMessage(
     | {
         readonly outcome: "thread-not-ready";
         readonly reason:
-          "machine-unavailable" | "not-claude" | "thread-not-idle" | "thread-not-ready";
+          | "machine-unavailable"
+          | "not-claude"
+          | "thread-not-idle"
+          | "thread-not-ready";
       },
 ): string {
   if (admission.outcome === "host-busy") {
