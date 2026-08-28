@@ -16,7 +16,7 @@ The plugin has no email field. Account selection and credentials stay on Claude'
 
 ## Requirements
 
-- BB 0.38 or newer.
+- BB 0.39 or newer.
 - A Claude.ai Pro, Max, Team, or Enterprise login. Console and API-key authentication are rejected.
 - macOS or Linux on the target session machine.
 - Claude Code on that machine, with Node.js provided by a trusted host `PATH`.

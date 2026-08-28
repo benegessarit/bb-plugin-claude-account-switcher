@@ -125,10 +125,17 @@ async function beginAndAttach(
   });
 }
 
-test("the current-login RPC verifies the exact host and releases an idle runtime", async () => {
+test("the current-login RPC accepts BB 0.39 provider status and releases an idle runtime", async () => {
   const host = createFakePluginHost({
     pluginId: "claude-account-switcher",
     sdk: {
+      hosts: {
+        providerCliStatus: async () => ({
+          claudeCode: providerCliStatus["claude-code"],
+          codex: providerCliStatus.codex,
+          cursor: providerCliStatus["acp-cursor"],
+        }),
+      },
       terminals: {
         close: async () => ({
           exitCode: 0,

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-claude-account-switcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Switch the machine-wide Claude subscription used by one BB Claude Code session without restarting BB.",
   "author": {
     "name": "David Beyer",
@@ -26,8 +26,8 @@
   "type": "module",
   "engines": {
     "node": "^22.19.0 || ^24.0.0 || ^26.0.0",
-    "bb": ">=0.38",
-    "bbPluginSdk": ">=0.4.11"
+    "bb": ">=0.39",
+    "bbPluginSdk": ">=0.4.8"
   },
   "os": [
     "darwin",
@@ -62,7 +62,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.11",
+    "@get-bb/plugin-sdk": "0.4.8",
     "@radix-ui/react-dialog": "^1.1.19",
     "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.12",

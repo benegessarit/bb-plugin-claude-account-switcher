@@ -389,11 +389,19 @@ export default async function plugin(bb: BbPluginApi) {
     signal: AbortSignal,
   ): Promise<string> {
     const status = await bb.sdk.hosts.providerCliStatus({ hostId, signal });
-    const claudeStatus = status["claude-code"];
+    const providerStatuses = status as unknown as Record<
+      string,
+      | {
+          readonly executablePath?: unknown;
+          readonly installed?: unknown;
+        }
+      | undefined
+    >;
+    const claudeStatus = providerStatuses["claude-code"] ?? providerStatuses.claudeCode;
     const executablePath = claudeStatus?.executablePath;
     if (
-      !claudeStatus?.installed ||
-      !executablePath ||
+      claudeStatus?.installed !== true ||
+      typeof executablePath !== "string" ||
       !executablePath.startsWith("/")
     ) {
       throw new Error("BB could not resolve Claude Code on this session's machine.");
