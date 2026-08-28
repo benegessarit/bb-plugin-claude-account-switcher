@@ -6,6 +6,7 @@
     "name": "David Beyer",
     "url": "https://github.com/benegessarit"
   },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/benegessarit/bb-plugin-claude-account-switcher.git"

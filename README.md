@@ -99,3 +99,7 @@ Reload a locally installed checkout after successful checks:
 ```sh
 bb plugin reload claude-account-switcher
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
