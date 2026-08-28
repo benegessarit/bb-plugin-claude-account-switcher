@@ -6,7 +6,7 @@
 2. A failed turn must never be retried automatically; the next message starts after runtime release.
 3. Credentials, raw auth output, and account identity must never enter the plugin RPC surface or be stored or logged. A one-time authorization code may cross RPC only after terminal echo is disabled; it must be one bounded printable line, one terminal-input call may be in flight, a reported delivery failure may be retried on the same operation, and the code must never be stored or logged.
 4. Cancellation must be truthful before and after successful machine-wide login.
-5. Account-changing login must follow the `BROWSER` adapter contract in `CLAUDE.md`: at most one Chrome invocation per operation, normal-cookie isolation without a profile override, no OS-window guarantee, and no email collection.
+5. Account-changing login must follow the `BROWSER` adapter contract in `CLAUDE.md`: each captured authorization URL may open automatically at most once, a late native callback may replace an already-opened manual fallback, normal-cookie isolation uses no profile override, Chrome owns OS-window behavior, and the plugin collects no email address.
 6. A helper-terminal record may be removed only after BB reports `exited`. Disconnection, a thrown close, or a newer plugin generation must retain or recover durable ownership.
 7. Admission, cancellation, code input, attachment, and completion must target one exact operation. A remount must not create a second operation or report completion twice.
 8. Visible workflow changes need focused component tests. The generated app bundle must also activate through BB's shared-runtime seam; source tests alone are not package proof.
