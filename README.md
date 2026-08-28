@@ -19,7 +19,7 @@ The plugin has no email field. Account selection and credentials stay on Claude'
 - BB 0.38 or newer.
 - A Claude.ai Pro, Max, Team, or Enterprise login. Console and API-key authentication are rejected.
 - macOS or Linux on the target session machine.
-- Claude Code and Node.js on that machine.
+- Claude Code on that machine, with Node.js provided by a trusted host `PATH`.
 - `/bin/sh`, `/bin/stty`, and `mktemp` from `/usr/bin`, `/bin`, or the trusted host `PATH`.
 - Google Chrome in its standard macOS location, or Chrome or Chromium on the trusted host `PATH`, when signing in to another account.
 
@@ -63,7 +63,7 @@ Claude Code owns the OAuth flow. The plugin gives it a short-lived `BROWSER` com
 
 The plugin never reads or copies browser passwords, Claude credential files, or macOS Keychain data.
 
-Normal completion and cancellation remove the temporary launcher and URL. A force-killed host process can leave the owner-only temporary directory for the operating system to clean up.
+Normal completion and confirmed graceful cancellation remove the temporary launcher and URL. If the machine disconnects or helper cleanup cannot be confirmed, the plugin keeps ownership recorded and may leave the owner-only temporary directory until later reconciliation or operating-system cleanup.
 
 ## Safety and limits
 
@@ -71,6 +71,7 @@ Normal completion and cancellation remove the temporary launcher and URL. A forc
 - The plugin refuses to switch an active, starting, or stopping thread.
 - It verifies the exact machine that owns the thread and allows only one account change at a time on that machine.
 - It uses the exact Claude Code executable that BB reports for the thread's machine.
+- Its authentication helpers resolve `node` from the thread machine's trusted `PATH`. Treat that `PATH` as part of the plugin's trust boundary.
 - Unresolved helper processes remain recorded across plugin reloads. Another switch cannot start on that machine until cleanup is confirmed.
 - Raw `claude auth status` output never enters BB. The verification helper returns only the fields needed to confirm a Claude subscription login.
 - A one-time authorization code is accepted only after terminal echo is disabled. The code is bounded to one printable line and is never stored or logged.
