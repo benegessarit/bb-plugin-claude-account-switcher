@@ -4,6 +4,8 @@ import {
   buildClaudeAuthStatusCommand,
   buildClaudeAuthorizationReopenCommand,
   buildClaudeLoginCommand,
+} from "./login-host-command";
+import {
   runClaudeAuthorizationReopen,
   runClaudeAuthStatus,
   runClaudeLogin,
