@@ -12,11 +12,14 @@ import {
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
+import * as loginHostCommand from "../login-host-command.ts";
 import * as loginTerminal from "../login-terminal.ts";
 import {
   buildClaudeAuthorizationReopenCommand,
   buildChromeIncognitoLauncher,
   buildClaudeLoginCommand,
+} from "../login-host-command.ts";
+import {
   runClaudeAuthorizationReopen,
   runClaudeAuthStatus,
   runClaudeLogin,
@@ -1220,7 +1223,7 @@ test("a failed Claude browser callback stops with a safe error", async () => {
 
 test("the auth-status command emits only safe classification fields", () => {
   const buildCommand = Reflect.get(
-    loginTerminal,
+    loginHostCommand,
     "buildClaudeAuthStatusCommand",
   ) as unknown;
   assert.equal(typeof buildCommand, "function");
@@ -1251,7 +1254,7 @@ test("the auth-status helper stays readable, then self-exits if cleanup is lost"
 
   const child = spawn(
     "/bin/sh",
-    ["-c", loginTerminal.buildClaudeAuthStatusCommand(fakeClaude, 1_000)],
+    ["-c", loginHostCommand.buildClaudeAuthStatusCommand(fakeClaude, 1_000)],
     {
       detached: true,
       env: {
@@ -1313,7 +1316,7 @@ test("the auth-status helper kills a hung Claude status command", async () => {
 
   const child = spawn(
     "/bin/sh",
-    ["-c", loginTerminal.buildClaudeAuthStatusCommand(fakeClaude, 200)],
+    ["-c", loginHostCommand.buildClaudeAuthStatusCommand(fakeClaude, 200)],
     {
       detached: true,
       env: {
@@ -1346,7 +1349,7 @@ test("the auth-status helper kills a hung Claude status command", async () => {
 });
 
 test("auth status accepts the CRLF output produced by a BB terminal", () => {
-  const parse = Reflect.get(loginTerminal, "parseClaudeAuthStatus") as unknown;
+  const parse = Reflect.get(loginHostCommand, "parseClaudeAuthStatus") as unknown;
   assert.equal(typeof parse, "function");
 
   const output = [
@@ -1363,7 +1366,7 @@ test("auth status accepts the CRLF output produced by a BB terminal", () => {
 });
 
 test("auth status accepts a first-party Claude login without subscriptionType", () => {
-  const parse = Reflect.get(loginTerminal, "parseClaudeAuthStatus") as (
+  const parse = Reflect.get(loginHostCommand, "parseClaudeAuthStatus") as (
     value: string,
   ) => unknown;
 
@@ -1392,7 +1395,7 @@ test("the auth-status helper supports Claude accounts without subscriptionType",
   try {
     const result = spawnSync(
       "/bin/sh",
-      ["-c", loginTerminal.buildClaudeAuthStatusCommand(fakeClaude, 1_000)],
+      ["-c", loginHostCommand.buildClaudeAuthStatusCommand(fakeClaude, 1_000)],
       {
         encoding: "utf8",
         env: {
@@ -1415,7 +1418,7 @@ test("the auth-status helper supports Claude accounts without subscriptionType",
 });
 
 test("auth status fails closed on unsafe or incomplete output", () => {
-  const parse = Reflect.get(loginTerminal, "parseClaudeAuthStatus") as (
+  const parse = Reflect.get(loginHostCommand, "parseClaudeAuthStatus") as (
     value: string,
   ) => unknown;
 
