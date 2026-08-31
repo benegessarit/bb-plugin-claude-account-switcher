@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-claude-account-switcher",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Switch the machine-wide Claude subscription used by one BB Claude Code session without restarting BB.",
   "author": {
     "name": "David Beyer",
