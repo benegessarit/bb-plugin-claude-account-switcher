@@ -80,7 +80,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cron-parser": "^5.10.0",
-    "hono": "^4.13.2",
+    "hono": "^4.13.7",
     "jsdom": "^30.0.1",
     "prettier": "^3.6.2",
     "react": "^19.2.8",
